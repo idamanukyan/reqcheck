@@ -1,0 +1,16 @@
+{
+  "title": "User Email Verification",
+  "description": "After registration, users must verify their email address before accessing the dashboard. An email containing a verification link is sent to the registered email address. The link expires after 24 hours.",
+  "acceptance_criteria": [
+    "GIVEN a newly registered user WHEN they check their email THEN they receive a verification email within 60 seconds",
+    "GIVEN a valid verification link WHEN the user clicks it THEN their account status changes to 'verified' and they are redirected to the dashboard",
+    "GIVEN an expired verification link (older than 24 hours) WHEN the user clicks it THEN they see an error message 'Link expired' and a button to request a new link",
+    "GIVEN a user with unverified email WHEN they try to access the dashboard THEN they are redirected to a page showing 'Please verify your email'",
+    "GIVEN a verified user WHEN they try to use a verification link again THEN they see 'Email already verified' and are redirected to dashboard"
+  ],
+  "type": "story",
+  "metadata": {
+    "priority": "high",
+    "epic": "User Onboarding"
+  }
+}

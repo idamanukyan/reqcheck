@@ -1,0 +1,17 @@
+{
+  "title": "User Password Reset Feature",
+  "description": "Users should be able to reset their password when they forget it. The system should handle this appropriately and send an email quickly. The password reset functionality must be secure.",
+  "acceptance_criteria": [
+    "User can request password reset from login page",
+    "System sends reset email quickly",
+    "Password reset link works correctly",
+    "New password is validated properly",
+    "User is redirected after successful reset"
+  ],
+  "type": "story",
+  "metadata": {
+    "priority": "high",
+    "sprint": "2024-Q1",
+    "labels": ["authentication", "security"]
+  }
+}
