@@ -76,6 +76,24 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0", description="API server host")
     api_port: int = Field(default=8000, ge=1, le=65535, description="API server port")
 
+    # Rate Limiting Configuration
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Enable API rate limiting",
+    )
+    rate_limit_default: str = Field(
+        default="60/minute",
+        description="Default rate limit (e.g., '60/minute', '100/hour')",
+    )
+    rate_limit_analyze: str = Field(
+        default="30/minute",
+        description="Rate limit for /analyze endpoints",
+    )
+    rate_limit_batch: str = Field(
+        default="10/minute",
+        description="Rate limit for /analyze/batch endpoint",
+    )
+
     @property
     def llm_available(self) -> bool:
         """Check if LLM analysis is available."""

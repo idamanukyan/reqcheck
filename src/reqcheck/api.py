@@ -4,10 +4,13 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from reqcheck.core.analyzer import RequirementsAnalyzer
 from reqcheck.core.config import Settings, get_settings
@@ -116,6 +119,9 @@ class BatchResponse(BaseModel):
 _analyzer: RequirementsAnalyzer | None = None
 _settings: Settings | None = None
 
+# Rate limiter - initialized with default settings, reconfigured in lifespan
+limiter = Limiter(key_func=get_remote_address)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -123,6 +129,18 @@ async def lifespan(app: FastAPI):
     global _analyzer, _settings
     _settings = get_settings()
     _analyzer = RequirementsAnalyzer(_settings)
+
+    # Configure rate limiter based on settings
+    if _settings.rate_limit_enabled:
+        limiter.enabled = True
+        logger.info(
+            f"Rate limiting enabled: default={_settings.rate_limit_default}, "
+            f"analyze={_settings.rate_limit_analyze}, batch={_settings.rate_limit_batch}"
+        )
+    else:
+        limiter.enabled = False
+        logger.info("Rate limiting disabled")
+
     logger.info("reqcheck API started")
     yield
     logger.info("reqcheck API shutting down")
@@ -136,6 +154,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Add rate limiter state and exception handler
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -146,8 +168,27 @@ app.add_middleware(
 )
 
 
+def _get_default_limit() -> str:
+    """Get default rate limit from settings."""
+    settings = _settings or get_settings()
+    return settings.rate_limit_default
+
+
+def _get_analyze_limit() -> str:
+    """Get analyze rate limit from settings."""
+    settings = _settings or get_settings()
+    return settings.rate_limit_analyze
+
+
+def _get_batch_limit() -> str:
+    """Get batch rate limit from settings."""
+    settings = _settings or get_settings()
+    return settings.rate_limit_batch
+
+
 @app.get("/health", response_model=HealthResponse)
-async def health_check():
+@limiter.limit(_get_default_limit)
+async def health_check(request: Request):
     """Check API health status."""
     settings = _settings or get_settings()
     return HealthResponse(
@@ -158,7 +199,8 @@ async def health_check():
 
 
 @app.post("/analyze", response_model=AnalysisResponse)
-async def analyze_requirement(request: RequirementRequest):
+@limiter.limit(_get_analyze_limit)
+async def analyze_requirement(request: Request, body: RequirementRequest):
     """
     Analyze a single requirement for quality issues.
 
@@ -173,7 +215,7 @@ async def analyze_requirement(request: RequirementRequest):
         _analyzer = RequirementsAnalyzer(get_settings())
 
     try:
-        requirement = request.to_requirement()
+        requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
         return AnalysisResponse.from_report(report)
     except Exception as e:
@@ -182,7 +224,8 @@ async def analyze_requirement(request: RequirementRequest):
 
 
 @app.post("/analyze/batch", response_model=BatchResponse)
-async def analyze_batch(request: BatchRequest):
+@limiter.limit(_get_batch_limit)
+async def analyze_batch(request: Request, body: BatchRequest):
     """
     Analyze multiple requirements in batch.
 
@@ -197,7 +240,7 @@ async def analyze_batch(request: BatchRequest):
     total_blockers = 0
     ready_count = 0
 
-    for req in request.requirements:
+    for req in body.requirements:
         try:
             requirement = req.to_requirement()
             report = _analyzer.analyze(requirement)
@@ -223,8 +266,10 @@ async def analyze_batch(request: BatchRequest):
 
 
 @app.post("/analyze/markdown", response_class=PlainTextResponse)
+@limiter.limit(_get_analyze_limit)
 async def analyze_markdown(
-    request: RequirementRequest,
+    request: Request,
+    body: RequirementRequest,
     include_evidence: bool = Query(default=True, description="Include evidence snippets"),
 ):
     """
@@ -241,7 +286,7 @@ async def analyze_markdown(
         _settings = get_settings()
 
     try:
-        requirement = request.to_requirement()
+        requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
 
         _settings.include_evidence = include_evidence
@@ -252,7 +297,8 @@ async def analyze_markdown(
 
 
 @app.post("/analyze/summary", response_class=PlainTextResponse)
-async def analyze_summary(request: RequirementRequest):
+@limiter.limit(_get_analyze_limit)
+async def analyze_summary(request: Request, body: RequirementRequest):
     """
     Analyze a requirement and return brief summary.
 
@@ -264,7 +310,7 @@ async def analyze_summary(request: RequirementRequest):
         _analyzer = RequirementsAnalyzer(get_settings())
 
     try:
-        requirement = request.to_requirement()
+        requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
         return format_summary(report)
     except Exception as e:
@@ -273,7 +319,8 @@ async def analyze_summary(request: RequirementRequest):
 
 
 @app.post("/analyze/checklist", response_class=PlainTextResponse)
-async def analyze_checklist(request: RequirementRequest):
+@limiter.limit(_get_analyze_limit)
+async def analyze_checklist(request: Request, body: RequirementRequest):
     """
     Analyze a requirement and return checklist format.
 
@@ -285,7 +332,7 @@ async def analyze_checklist(request: RequirementRequest):
         _analyzer = RequirementsAnalyzer(get_settings())
 
     try:
-        requirement = request.to_requirement()
+        requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
         return format_checklist(report)
     except Exception as e:
@@ -298,6 +345,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     global _analyzer, _settings
     _settings = settings or get_settings()
     _analyzer = RequirementsAnalyzer(_settings)
+
+    # Configure rate limiter based on settings
+    limiter.enabled = _settings.rate_limit_enabled
+
     return app
 
 
