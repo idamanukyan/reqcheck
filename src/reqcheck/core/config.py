@@ -94,10 +94,102 @@ class Settings(BaseSettings):
         description="Rate limit for /analyze/batch endpoint",
     )
 
+    # CORS Configuration
+    cors_allowed_origins: str = Field(
+        default="*",
+        description="Comma-separated list of allowed CORS origins or '*' for all",
+    )
+    cors_allow_credentials: bool = Field(
+        default=True,
+        description="Allow credentials in CORS requests",
+    )
+    cors_allow_methods: str = Field(
+        default="*",
+        description="Comma-separated list of allowed HTTP methods or '*' for all",
+    )
+    cors_allow_headers: str = Field(
+        default="*",
+        description="Comma-separated list of allowed headers or '*' for all",
+    )
+
+    # Authentication Configuration
+    auth_enabled: bool = Field(
+        default=False,
+        description="Enable API key authentication (disabled by default)",
+    )
+    api_keys: str = Field(
+        default="",
+        description="Comma-separated list of valid API keys",
+    )
+    auth_header_name: str = Field(
+        default="X-API-Key",
+        description="Header name for API key authentication",
+    )
+
+    # Request Size Limits
+    max_title_length: int = Field(
+        default=500,
+        ge=10,
+        le=2000,
+        description="Maximum character length for requirement title",
+    )
+    max_description_length: int = Field(
+        default=10000,
+        ge=100,
+        le=100000,
+        description="Maximum character length for requirement description",
+    )
+    max_acceptance_criteria_count: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Maximum number of acceptance criteria per requirement",
+    )
+    max_acceptance_criteria_length: int = Field(
+        default=2000,
+        ge=50,
+        le=10000,
+        description="Maximum character length for each acceptance criterion",
+    )
+    max_metadata_size_bytes: int = Field(
+        default=10240,
+        ge=256,
+        le=102400,
+        description="Maximum size of metadata JSON in bytes",
+    )
+
     @property
     def llm_available(self) -> bool:
         """Check if LLM analysis is available."""
         return bool(self.openai_api_key) and self.enable_llm_analysis
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Parse CORS origins into a list."""
+        if self.cors_allowed_origins == "*":
+            return ["*"]
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def cors_methods_list(self) -> list[str]:
+        """Parse CORS methods into a list."""
+        if self.cors_allow_methods == "*":
+            return ["*"]
+        return [m.strip() for m in self.cors_allow_methods.split(",") if m.strip()]
+
+    @property
+    def cors_headers_list(self) -> list[str]:
+        """Parse CORS headers into a list."""
+        if self.cors_allow_headers == "*":
+            return ["*"]
+        return [h.strip() for h in self.cors_allow_headers.split(",") if h.strip()]
+
+    @property
+    def api_keys_set(self) -> set[str]:
+        """Parse API keys into a set for O(1) lookup."""
+        if not self.api_keys:
+            return set()
+        return {k.strip() for k in self.api_keys.split(",") if k.strip()}
 
 
 @lru_cache

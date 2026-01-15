@@ -1,12 +1,14 @@
 """FastAPI REST API for reqcheck."""
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
+from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -119,8 +121,14 @@ class BatchResponse(BaseModel):
 _analyzer: RequirementsAnalyzer | None = None
 _settings: Settings | None = None
 
+# Load settings at module level for CORS configuration (middleware must be configured at startup)
+_startup_settings = get_settings()
+
 # Rate limiter - initialized with default settings, reconfigured in lifespan
 limiter = Limiter(key_func=get_remote_address)
+
+# API Key security scheme
+api_key_header = APIKeyHeader(name=_startup_settings.auth_header_name, auto_error=False)
 
 
 @asynccontextmanager
@@ -158,13 +166,13 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Add CORS middleware
+# Add CORS middleware (configured from settings at startup)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_startup_settings.cors_origins_list,
+    allow_credentials=_startup_settings.cors_allow_credentials,
+    allow_methods=_startup_settings.cors_methods_list,
+    allow_headers=_startup_settings.cors_headers_list,
 )
 
 
@@ -186,6 +194,78 @@ def _get_batch_limit() -> str:
     return settings.rate_limit_batch
 
 
+async def verify_api_key(
+    api_key: str | None = Security(api_key_header),
+) -> str | None:
+    """Verify API key if authentication is enabled."""
+    settings = _settings or get_settings()
+
+    # If auth is disabled, allow all requests
+    if not settings.auth_enabled:
+        return None
+
+    # Auth is enabled - require valid API key
+    if api_key is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key. Include X-API-Key header.",
+            headers={"WWW-Authenticate": "ApiKey"},
+        )
+
+    if api_key not in settings.api_keys_set:
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid API key",
+        )
+
+    return api_key
+
+
+def validate_requirement_size(body: RequirementRequest, settings: Settings) -> None:
+    """Validate request body against size limits."""
+    errors = []
+
+    # Title length
+    if len(body.title) > settings.max_title_length:
+        errors.append(f"Title exceeds maximum length of {settings.max_title_length} characters")
+
+    # Description length
+    if len(body.description) > settings.max_description_length:
+        errors.append(
+            f"Description exceeds maximum length of {settings.max_description_length} characters"
+        )
+
+    # Acceptance criteria count
+    if len(body.acceptance_criteria) > settings.max_acceptance_criteria_count:
+        errors.append(
+            f"Too many acceptance criteria (max: {settings.max_acceptance_criteria_count})"
+        )
+
+    # Individual AC length
+    for i, ac in enumerate(body.acceptance_criteria):
+        if len(ac) > settings.max_acceptance_criteria_length:
+            errors.append(
+                f"Acceptance criterion #{i + 1} exceeds maximum length of "
+                f"{settings.max_acceptance_criteria_length} characters"
+            )
+
+    # Metadata size
+    try:
+        metadata_json = json.dumps(body.metadata)
+        if len(metadata_json.encode("utf-8")) > settings.max_metadata_size_bytes:
+            errors.append(
+                f"Metadata exceeds maximum size of {settings.max_metadata_size_bytes} bytes"
+            )
+    except (TypeError, ValueError) as e:
+        errors.append(f"Invalid metadata format: {e}")
+
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Request validation failed", "errors": errors},
+        )
+
+
 @app.get("/health", response_model=HealthResponse)
 @limiter.limit(_get_default_limit)
 async def health_check(request: Request):
@@ -200,7 +280,11 @@ async def health_check(request: Request):
 
 @app.post("/analyze", response_model=AnalysisResponse)
 @limiter.limit(_get_analyze_limit)
-async def analyze_requirement(request: Request, body: RequirementRequest):
+async def analyze_requirement(
+    request: Request,
+    body: RequirementRequest,
+    api_key: str | None = Depends(verify_api_key),
+):
     """
     Analyze a single requirement for quality issues.
 
@@ -209,10 +293,16 @@ async def analyze_requirement(request: Request, body: RequirementRequest):
     - Scores for ambiguity, completeness, and testability
     - Executive summary and recommendations
     """
-    global _analyzer
+    global _analyzer, _settings
+
+    if _settings is None:
+        _settings = get_settings()
+
+    # Validate request size
+    validate_requirement_size(body, _settings)
 
     if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(get_settings())
+        _analyzer = RequirementsAnalyzer(_settings)
 
     try:
         requirement = body.to_requirement()
@@ -225,16 +315,27 @@ async def analyze_requirement(request: Request, body: RequirementRequest):
 
 @app.post("/analyze/batch", response_model=BatchResponse)
 @limiter.limit(_get_batch_limit)
-async def analyze_batch(request: Request, body: BatchRequest):
+async def analyze_batch(
+    request: Request,
+    body: BatchRequest,
+    api_key: str | None = Depends(verify_api_key),
+):
     """
     Analyze multiple requirements in batch.
 
     Limited to 10 requirements per request.
     """
-    global _analyzer
+    global _analyzer, _settings
+
+    if _settings is None:
+        _settings = get_settings()
+
+    # Validate each requirement in batch
+    for req in body.requirements:
+        validate_requirement_size(req, _settings)
 
     if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(get_settings())
+        _analyzer = RequirementsAnalyzer(_settings)
 
     results = []
     total_blockers = 0
@@ -271,6 +372,7 @@ async def analyze_markdown(
     request: Request,
     body: RequirementRequest,
     include_evidence: bool = Query(default=True, description="Include evidence snippets"),
+    api_key: str | None = Depends(verify_api_key),
 ):
     """
     Analyze a requirement and return Markdown-formatted report.
@@ -279,18 +381,25 @@ async def analyze_markdown(
     """
     global _analyzer, _settings
 
-    if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(get_settings())
-
     if _settings is None:
         _settings = get_settings()
+
+    # Validate request size
+    validate_requirement_size(body, _settings)
+
+    if _analyzer is None:
+        _analyzer = RequirementsAnalyzer(_settings)
 
     try:
         requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
 
-        _settings.include_evidence = include_evidence
-        return format_markdown(report, _settings)
+        # Create a copy of settings to avoid mutating global state
+        format_settings = Settings(
+            **{k: v for k, v in _settings.model_dump().items() if k != "include_evidence"},
+            include_evidence=include_evidence,
+        )
+        return format_markdown(report, format_settings)
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
@@ -298,16 +407,26 @@ async def analyze_markdown(
 
 @app.post("/analyze/summary", response_class=PlainTextResponse)
 @limiter.limit(_get_analyze_limit)
-async def analyze_summary(request: Request, body: RequirementRequest):
+async def analyze_summary(
+    request: Request,
+    body: RequirementRequest,
+    api_key: str | None = Depends(verify_api_key),
+):
     """
     Analyze a requirement and return brief summary.
 
     Useful for CI/CD integration or quick checks.
     """
-    global _analyzer
+    global _analyzer, _settings
+
+    if _settings is None:
+        _settings = get_settings()
+
+    # Validate request size
+    validate_requirement_size(body, _settings)
 
     if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(get_settings())
+        _analyzer = RequirementsAnalyzer(_settings)
 
     try:
         requirement = body.to_requirement()
@@ -320,16 +439,26 @@ async def analyze_summary(request: Request, body: RequirementRequest):
 
 @app.post("/analyze/checklist", response_class=PlainTextResponse)
 @limiter.limit(_get_analyze_limit)
-async def analyze_checklist(request: Request, body: RequirementRequest):
+async def analyze_checklist(
+    request: Request,
+    body: RequirementRequest,
+    api_key: str | None = Depends(verify_api_key),
+):
     """
     Analyze a requirement and return checklist format.
 
     Useful for quick pass/fail checks.
     """
-    global _analyzer
+    global _analyzer, _settings
+
+    if _settings is None:
+        _settings = get_settings()
+
+    # Validate request size
+    validate_requirement_size(body, _settings)
 
     if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(get_settings())
+        _analyzer = RequirementsAnalyzer(_settings)
 
     try:
         requirement = body.to_requirement()
