@@ -3,6 +3,15 @@
 import logging
 
 from reqcheck.analyzers.base import BaseAnalyzer
+from reqcheck.core.constants import (
+    PENALTY_REDUCTION_FACTOR_LONG_TEXT,
+    SCORE_BASELINE_NO_LLM,
+    SCORE_DEFAULT_LLM_FALLBACK,
+    SCORE_PERFECT,
+    SEVERITY_WEIGHT_DEFAULT,
+    TEXT_LENGTH_LONG_THRESHOLD,
+    get_severity_weights,
+)
 from reqcheck.core.models import Issue, IssueCategory, Requirement
 from reqcheck.llm.client import LLMClientError
 
@@ -27,7 +36,7 @@ class AmbiguityAnalyzer(BaseAnalyzer):
         """
         rule_issues: list[Issue] = []
         llm_issues: list[Issue] = []
-        score = 1.0  # Start with perfect score
+        score = SCORE_PERFECT
 
         # Run rule-based analysis
         if self._settings.enable_rule_based_analysis:
@@ -39,7 +48,7 @@ class AmbiguityAnalyzer(BaseAnalyzer):
             try:
                 response = self.llm_client.analyze_ambiguity(requirement.full_text)
                 llm_issues = self._parse_llm_issues(response, self.category)
-                score = response.get("ambiguity_score", 0.5)
+                score = response.get("ambiguity_score", SCORE_DEFAULT_LLM_FALLBACK)
                 logger.debug(f"LLM analysis found {len(llm_issues)} ambiguity issues")
             except LLMClientError as e:
                 logger.warning(f"LLM analysis failed: {e}")
@@ -60,15 +69,15 @@ class AmbiguityAnalyzer(BaseAnalyzer):
     ) -> float:
         """Estimate ambiguity score based on rule matches."""
         if not issues:
-            return 0.9  # Assume good but not perfect without LLM validation
+            return SCORE_BASELINE_NO_LLM
 
         # Weight by severity
-        weights = {"blocker": 0.15, "warning": 0.08, "suggestion": 0.03}
-        penalty = sum(weights.get(i.severity.value, 0.05) for i in issues)
+        weights = get_severity_weights()
+        penalty = sum(weights.get(i.severity.value, SEVERITY_WEIGHT_DEFAULT) for i in issues)
 
         # Normalize by text length (more text = more potential matches)
         text_len = len(requirement.full_text)
-        if text_len > 500:
-            penalty *= 0.8  # Reduce penalty for longer requirements
+        if text_len > TEXT_LENGTH_LONG_THRESHOLD:
+            penalty *= PENALTY_REDUCTION_FACTOR_LONG_TEXT
 
-        return max(0.0, min(1.0, 1.0 - penalty))
+        return max(0.0, min(1.0, SCORE_PERFECT - penalty))

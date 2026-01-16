@@ -4,6 +4,17 @@ import logging
 import re
 
 from reqcheck.analyzers.base import BaseAnalyzer
+from reqcheck.core.constants import (
+    BONUS_TESTABLE_PATTERNS,
+    RESTATEMENT_OVERLAP_THRESHOLD,
+    SCORE_BASELINE_TESTABILITY,
+    SCORE_DEFAULT_LLM_FALLBACK,
+    SCORE_NO_ACCEPTANCE_CRITERIA,
+    SCORE_PERFECT,
+    SEVERITY_WEIGHT_DEFAULT,
+    SHORT_CRITERION_THRESHOLD,
+    get_severity_weights,
+)
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
 from reqcheck.llm.client import LLMClientError
 
@@ -56,7 +67,7 @@ class TestabilityAnalyzer(BaseAnalyzer):
         """
         rule_issues: list[Issue] = []
         llm_issues: list[Issue] = []
-        score = 1.0
+        score = SCORE_PERFECT
 
         # Check acceptance criteria testability
         ac_issues = self._check_acceptance_criteria_testability(requirement)
@@ -73,7 +84,7 @@ class TestabilityAnalyzer(BaseAnalyzer):
             try:
                 response = self.llm_client.analyze_testability(requirement.full_text)
                 llm_issues = self._parse_llm_issues(response, self.category)
-                score = response.get("testability_score", 0.5)
+                score = response.get("testability_score", SCORE_DEFAULT_LLM_FALLBACK)
 
                 # Log suggested test scenarios for reference
                 scenarios = response.get("suggested_test_scenarios", [])
@@ -124,7 +135,7 @@ class TestabilityAnalyzer(BaseAnalyzer):
                     )
 
             # If no testable patterns found and it's a short criterion
-            if not has_testable_pattern and len(ac) < 100:
+            if not has_testable_pattern and len(ac) < SHORT_CRITERION_THRESHOLD:
                 # Check if it's just a restatement
                 if self._is_restatement(ac, requirement.title):
                     issues.append(
@@ -156,16 +167,16 @@ class TestabilityAnalyzer(BaseAnalyzer):
 
         # Check overlap
         overlap = len(ac_words & title_words) / len(ac_words)
-        return overlap > 0.7
+        return overlap > RESTATEMENT_OVERLAP_THRESHOLD
 
     def _estimate_score_from_rules(
         self, issues: list[Issue], requirement: Requirement
     ) -> float:
         """Estimate testability score based on patterns and issues."""
         if not requirement.acceptance_criteria:
-            return 0.2  # Very low score without AC
+            return SCORE_NO_ACCEPTANCE_CRITERIA
 
-        base_score = 0.7  # Start with reasonable baseline
+        base_score = SCORE_BASELINE_TESTABILITY
 
         # Bonus for testable patterns in AC
         testable_count = 0
@@ -178,11 +189,11 @@ class TestabilityAnalyzer(BaseAnalyzer):
 
         if requirement.acceptance_criteria:
             testable_ratio = testable_count / len(requirement.acceptance_criteria)
-            base_score += testable_ratio * 0.2
+            base_score += testable_ratio * BONUS_TESTABLE_PATTERNS
 
         # Penalties from issues
-        weights = {"blocker": 0.15, "warning": 0.08, "suggestion": 0.03}
+        weights = get_severity_weights()
         for issue in issues:
-            base_score -= weights.get(issue.severity.value, 0.05)
+            base_score -= weights.get(issue.severity.value, SEVERITY_WEIGHT_DEFAULT)
 
         return max(0.0, min(1.0, base_score))

@@ -6,6 +6,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from reqcheck.core.constants import get_overall_score_weights
+
 
 class RequirementType(str, Enum):
     """Type of requirement document."""
@@ -95,7 +97,7 @@ class ScoreBreakdown(BaseModel):
 
     def calculate_overall(self) -> float:
         """Calculate weighted overall score."""
-        weights = {"ambiguity": 0.3, "completeness": 0.35, "testability": 0.35}
+        weights = get_overall_score_weights()
         self.overall = (
             self.ambiguity * weights["ambiguity"]
             + self.completeness * weights["completeness"]

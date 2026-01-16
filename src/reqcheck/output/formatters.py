@@ -4,10 +4,18 @@ import json
 from typing import Any
 
 from reqcheck.core.config import Settings, get_settings
+from reqcheck.core.constants import (
+    CHECKLIST_MESSAGE_MAX_LENGTH,
+    CHECKLIST_TOP_ISSUES_COUNT,
+    EVIDENCE_MAX_LENGTH,
+    JSON_INDENT,
+    QUALITY_PASS_THRESHOLD,
+    SCORE_BAR_WIDTH,
+)
 from reqcheck.core.models import AnalysisReport, Issue, Severity
 
 
-def format_json(report: AnalysisReport, indent: int = 2) -> str:
+def format_json(report: AnalysisReport, indent: int = JSON_INDENT) -> str:
     """
     Format report as JSON.
 
@@ -115,8 +123,8 @@ def format_markdown(
 
 def _score_bar(score: float) -> str:
     """Generate a visual score bar."""
-    filled = int(score * 10)
-    empty = 10 - filled
+    filled = int(score * SCORE_BAR_WIDTH)
+    empty = SCORE_BAR_WIDTH - filled
     bar = "█" * filled + "░" * empty
     return f"{bar} {score:.0%}"
 
@@ -133,7 +141,7 @@ def _format_issue_md(issue: Issue, settings: Settings) -> list[str]:
 
     # Evidence
     if settings.include_evidence and issue.evidence:
-        evidence = issue.evidence[:100] + "..." if len(issue.evidence) > 100 else issue.evidence
+        evidence = issue.evidence[:EVIDENCE_MAX_LENGTH] + "..." if len(issue.evidence) > EVIDENCE_MAX_LENGTH else issue.evidence
         lines.append(f"  - Evidence: `{evidence}`")
 
     # Suggestion
@@ -196,9 +204,9 @@ def format_checklist(report: AnalysisReport) -> str:
 
     # Quality checks
     checks = [
-        ("Testability", report.scores.testability >= 0.7, f"{report.scores.testability:.0%}"),
-        ("Completeness", report.scores.completeness >= 0.7, f"{report.scores.completeness:.0%}"),
-        ("Clarity", report.scores.ambiguity >= 0.7, f"{report.scores.ambiguity:.0%}"),
+        ("Testability", report.scores.testability >= QUALITY_PASS_THRESHOLD, f"{report.scores.testability:.0%}"),
+        ("Completeness", report.scores.completeness >= QUALITY_PASS_THRESHOLD, f"{report.scores.completeness:.0%}"),
+        ("Clarity", report.scores.ambiguity >= QUALITY_PASS_THRESHOLD, f"{report.scores.ambiguity:.0%}"),
         ("No Blockers", report.blocker_count == 0, f"{report.blocker_count} found"),
     ]
 
@@ -211,10 +219,10 @@ def format_checklist(report: AnalysisReport) -> str:
     # Top issues
     if report.issues:
         lines.append("Top Issues:")
-        for issue in report.issues[:5]:
+        for issue in report.issues[:CHECKLIST_TOP_ISSUES_COUNT]:
             severity_icon = {"blocker": "!", "warning": "?", "suggestion": "i"}
             icon = severity_icon.get(issue.severity.value, "-")
-            lines.append(f"  [{icon}] {issue.message[:80]}")
+            lines.append(f"  [{icon}] {issue.message[:CHECKLIST_MESSAGE_MAX_LENGTH]}")
 
     return "\n".join(lines)
 

@@ -4,6 +4,14 @@ import logging
 import re
 
 from reqcheck.analyzers.base import BaseAnalyzer
+from reqcheck.core.constants import (
+    MAX_EVIDENCE_MATCHES,
+    PENALTY_MULTIPLE_RISK_FACTORS,
+    RISK_FACTORS_HIGH_THRESHOLD,
+    SCORE_PERFECT,
+    SEVERITY_WEIGHT_DEFAULT,
+    get_risk_severity_weights,
+)
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
 from reqcheck.llm.client import LLMClientError
 
@@ -169,7 +177,7 @@ class RiskAnalyzer(BaseAnalyzer):
                         location="requirement",
                         message=f"Touches {domain.replace('_', ' ')} domain - requires additional review",
                         suggestion=self._get_domain_suggestion(domain),
-                        evidence=", ".join(list(set(matches))[:5]),
+                        evidence=", ".join(list(set(matches))[:MAX_EVIDENCE_MATCHES]),
                     )
                 )
 
@@ -222,15 +230,15 @@ class RiskAnalyzer(BaseAnalyzer):
 
         This is inverted from typical risk scoring for consistency with other analyzers.
         """
-        base_score = 1.0
+        base_score = SCORE_PERFECT
 
         # Penalty based on issue severity
-        weights = {"blocker": 0.2, "warning": 0.1, "suggestion": 0.03}
+        weights = get_risk_severity_weights()
         for issue in issues:
-            base_score -= weights.get(issue.severity.value, 0.05)
+            base_score -= weights.get(issue.severity.value, SEVERITY_WEIGHT_DEFAULT)
 
         # Additional penalty for multiple risk factors
-        if len(risk_factors) > 3:
-            base_score -= 0.1
+        if len(risk_factors) > RISK_FACTORS_HIGH_THRESHOLD:
+            base_score -= PENALTY_MULTIPLE_RISK_FACTORS
 
         return max(0.0, min(1.0, base_score))
