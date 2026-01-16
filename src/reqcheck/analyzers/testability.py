@@ -143,7 +143,10 @@ class TestabilityAnalyzer(BaseAnalyzer):
                             severity=Severity.WARNING,
                             category=self.category,
                             location=location,
-                            message="Acceptance criterion appears to restate the title without adding testable detail",
+                            message=(
+                                "Acceptance criterion appears to restate the title "
+                                "without adding testable detail"
+                            ),
                             suggestion="Add specific conditions, inputs, and expected outputs",
                             evidence=ac,
                         )
@@ -158,7 +161,10 @@ class TestabilityAnalyzer(BaseAnalyzer):
         title_words = set(re.findall(r"\w+", title.lower()))
 
         # Remove common stop words
-        stop_words = {"the", "a", "an", "is", "are", "will", "should", "must", "can", "be", "to", "and", "or", "it"}
+        stop_words = {
+            "the", "a", "an", "is", "are", "will", "should",
+            "must", "can", "be", "to", "and", "or", "it"
+        }
         ac_words -= stop_words
         title_words -= stop_words
 

@@ -100,7 +100,10 @@ class CompletenessAnalyzer(BaseAnalyzer):
                     category=self.category,
                     location="description",
                     message="Description is too short or missing",
-                    suggestion=f"Add a description of at least {MIN_DESCRIPTION_LENGTH} characters explaining the requirement in detail",
+                    suggestion=(
+                        f"Add a description of at least {MIN_DESCRIPTION_LENGTH} "
+                        "characters explaining the requirement in detail"
+                    ),
                     evidence=requirement.description[:50] if requirement.description else "(empty)",
                 )
             )
@@ -113,7 +116,10 @@ class CompletenessAnalyzer(BaseAnalyzer):
                     category=self.category,
                     location="acceptance_criteria",
                     message="No acceptance criteria defined",
-                    suggestion="Add at least one acceptance criterion that defines when this requirement is satisfied",
+                    suggestion=(
+                        "Add at least one acceptance criterion that defines "
+                        "when this requirement is satisfied"
+                    ),
                 )
             )
 
@@ -126,7 +132,10 @@ class CompletenessAnalyzer(BaseAnalyzer):
                         category=self.category,
                         location=f"acceptance_criteria[{i}]",
                         message="Acceptance criterion is too brief",
-                        suggestion="Expand to include specific conditions, inputs, and expected outcomes",
+                        suggestion=(
+                            "Expand to include specific conditions, "
+                            "inputs, and expected outcomes"
+                        ),
                         evidence=ac,
                     )
                 )

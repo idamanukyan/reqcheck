@@ -1,6 +1,5 @@
 """Output formatters for analysis reports."""
 
-import json
 from typing import Any
 
 from reqcheck.core.config import Settings, get_settings
@@ -141,7 +140,10 @@ def _format_issue_md(issue: Issue, settings: Settings) -> list[str]:
 
     # Evidence
     if settings.include_evidence and issue.evidence:
-        evidence = issue.evidence[:EVIDENCE_MAX_LENGTH] + "..." if len(issue.evidence) > EVIDENCE_MAX_LENGTH else issue.evidence
+        if len(issue.evidence) > EVIDENCE_MAX_LENGTH:
+            evidence = issue.evidence[:EVIDENCE_MAX_LENGTH] + "..."
+        else:
+            evidence = issue.evidence
         lines.append(f"  - Evidence: `{evidence}`")
 
     # Suggestion
@@ -169,7 +171,10 @@ def format_summary(report: AnalysisReport) -> str:
     lines.append("")
 
     # Issue counts
-    lines.append(f"Issues: {report.blocker_count} blockers, {report.warning_count} warnings, {report.suggestion_count} suggestions")
+    lines.append(
+        f"Issues: {report.blocker_count} blockers, "
+        f"{report.warning_count} warnings, {report.suggestion_count} suggestions"
+    )
 
     # Scores
     lines.append(
@@ -203,10 +208,12 @@ def format_checklist(report: AnalysisReport) -> str:
     lines.append("")
 
     # Quality checks
+    scores = report.scores
+    threshold = QUALITY_PASS_THRESHOLD
     checks = [
-        ("Testability", report.scores.testability >= QUALITY_PASS_THRESHOLD, f"{report.scores.testability:.0%}"),
-        ("Completeness", report.scores.completeness >= QUALITY_PASS_THRESHOLD, f"{report.scores.completeness:.0%}"),
-        ("Clarity", report.scores.ambiguity >= QUALITY_PASS_THRESHOLD, f"{report.scores.ambiguity:.0%}"),
+        ("Testability", scores.testability >= threshold, f"{scores.testability:.0%}"),
+        ("Completeness", scores.completeness >= threshold, f"{scores.completeness:.0%}"),
+        ("Clarity", scores.ambiguity >= threshold, f"{scores.ambiguity:.0%}"),
         ("No Blockers", report.blocker_count == 0, f"{report.blocker_count} found"),
     ]
 

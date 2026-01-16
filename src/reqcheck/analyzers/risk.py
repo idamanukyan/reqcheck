@@ -170,12 +170,13 @@ class RiskAnalyzer(BaseAnalyzer):
 
             if matches:
                 severity = self._get_domain_severity(domain)
+                domain_name = domain.replace('_', ' ')
                 issues.append(
                     Issue(
                         severity=severity,
                         category=self.category,
                         location="requirement",
-                        message=f"Touches {domain.replace('_', ' ')} domain - requires additional review",
+                        message=f"Touches {domain_name} domain - requires additional review",
                         suggestion=self._get_domain_suggestion(domain),
                         evidence=", ".join(list(set(matches))[:MAX_EVIDENCE_MATCHES]),
                     )
