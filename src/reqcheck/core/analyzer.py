@@ -1,6 +1,8 @@
 """Main analyzer orchestrator."""
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any
 
 from reqcheck.analyzers.ambiguity import AmbiguityAnalyzer
@@ -19,6 +21,15 @@ from reqcheck.core.models import (
 from reqcheck.llm.client import LLMClient, LLMClientError
 
 logger = logging.getLogger(__name__)
+
+
+class AnalysisTimeoutError(Exception):
+    """Raised when analysis exceeds the configured timeout."""
+
+    def __init__(self, timeout_seconds: int, message: str | None = None):
+        self.timeout_seconds = timeout_seconds
+        self.message = message or f"Analysis timed out after {timeout_seconds} seconds"
+        super().__init__(self.message)
 
 
 class RequirementsAnalyzer:
@@ -47,16 +58,41 @@ class RequirementsAnalyzer:
 
     def analyze(self, requirement: Requirement) -> AnalysisReport:
         """
-        Perform comprehensive analysis of a requirement.
+        Perform comprehensive analysis of a requirement with timeout enforcement.
 
         Args:
             requirement: The requirement to analyze
 
         Returns:
             Complete analysis report with issues, scores, and recommendations
-        """
-        logger.info(f"Analyzing requirement: {requirement.id} - {requirement.title[:50]}")
 
+        Raises:
+            AnalysisTimeoutError: If analysis exceeds the configured timeout
+        """
+        timeout = self._settings.analysis_timeout
+        logger.info(
+            f"Analyzing requirement: {requirement.id} - {requirement.title[:50]} "
+            f"(timeout: {timeout}s)"
+        )
+
+        # Run analysis with timeout enforcement
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._analyze_internal, requirement)
+            try:
+                return future.result(timeout=timeout)
+            except FuturesTimeoutError:
+                logger.error(
+                    f"Analysis timed out after {timeout}s for requirement: "
+                    f"{requirement.id}"
+                )
+                raise AnalysisTimeoutError(timeout)
+
+    def _analyze_internal(self, requirement: Requirement) -> AnalysisReport:
+        """
+        Internal analysis logic without timeout wrapper.
+
+        This method contains the actual analysis pipeline.
+        """
         all_issues: list[Issue] = []
         scores = ScoreBreakdown()
 
@@ -66,27 +102,36 @@ class RequirementsAnalyzer:
                 requirement
             )
             all_issues.extend(ambiguity_issues)
-            logger.debug(f"Ambiguity: {len(ambiguity_issues)} issues, score: {scores.ambiguity:.2f}")
+            logger.debug(
+                f"Ambiguity: {len(ambiguity_issues)} issues, "
+                f"score: {scores.ambiguity:.2f}"
+            )
         except Exception as e:
             logger.error(f"Ambiguity analysis failed: {e}")
 
         # Run completeness analysis
         try:
-            completeness_issues, scores.completeness = self._completeness_analyzer.analyze(
-                requirement
+            completeness_issues, scores.completeness = (
+                self._completeness_analyzer.analyze(requirement)
             )
             all_issues.extend(completeness_issues)
-            logger.debug(f"Completeness: {len(completeness_issues)} issues, score: {scores.completeness:.2f}")
+            logger.debug(
+                f"Completeness: {len(completeness_issues)} issues, "
+                f"score: {scores.completeness:.2f}"
+            )
         except Exception as e:
             logger.error(f"Completeness analysis failed: {e}")
 
         # Run testability analysis
         try:
-            testability_issues, scores.testability = self._testability_analyzer.analyze(
-                requirement
+            testability_issues, scores.testability = (
+                self._testability_analyzer.analyze(requirement)
             )
             all_issues.extend(testability_issues)
-            logger.debug(f"Testability: {len(testability_issues)} issues, score: {scores.testability:.2f}")
+            logger.debug(
+                f"Testability: {len(testability_issues)} issues, "
+                f"score: {scores.testability:.2f}"
+            )
         except Exception as e:
             logger.error(f"Testability analysis failed: {e}")
 
@@ -221,7 +266,10 @@ class RequirementsAnalyzer:
             status = "ready for development"
             urgency = "No significant issues found."
 
-        summary = f"This requirement is {status}. {urgency} Overall quality score: {scores.overall:.0%}."
+        summary = (
+            f"This requirement is {status}. {urgency} "
+            f"Overall quality score: {scores.overall:.0%}."
+        )
 
         # Generate recommendations
         recommendations = []
@@ -235,7 +283,9 @@ class RequirementsAnalyzer:
             recommendations.append("Clarify vague terms and add specific requirements")
 
         if scores.testability < 0.6:
-            recommendations.append("Make acceptance criteria more testable with measurable outcomes")
+            recommendations.append(
+                "Make acceptance criteria more testable with measurable outcomes"
+            )
 
         # Category-specific recommendations
         by_category: dict[IssueCategory, int] = {}

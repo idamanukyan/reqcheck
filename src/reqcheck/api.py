@@ -14,7 +14,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from reqcheck.core.analyzer import RequirementsAnalyzer
+from reqcheck.core.analyzer import AnalysisTimeoutError, RequirementsAnalyzer
 from reqcheck.core.config import Settings, get_settings
 from reqcheck.core.models import (
     AnalysisReport,
@@ -308,6 +308,12 @@ async def analyze_requirement(
         requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
         return AnalysisResponse.from_report(report)
+    except AnalysisTimeoutError as e:
+        logger.error(f"Analysis timed out: {e}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Analysis timed out after {e.timeout_seconds} seconds",
+        )
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
@@ -351,6 +357,15 @@ async def analyze_batch(
             total_blockers += response.blocker_count
             if response.is_ready_for_dev:
                 ready_count += 1
+        except AnalysisTimeoutError as e:
+            logger.error(f"Analysis timed out for '{req.title}': {e}")
+            raise HTTPException(
+                status_code=504,
+                detail=(
+                    f"Analysis timed out for '{req.title}' "
+                    f"after {e.timeout_seconds} seconds"
+                ),
+            )
         except Exception as e:
             logger.error(f"Analysis failed for '{req.title}': {e}")
             raise HTTPException(
@@ -400,6 +415,12 @@ async def analyze_markdown(
             include_evidence=include_evidence,
         )
         return format_markdown(report, format_settings)
+    except AnalysisTimeoutError as e:
+        logger.error(f"Analysis timed out: {e}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Analysis timed out after {e.timeout_seconds} seconds",
+        )
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
@@ -432,6 +453,12 @@ async def analyze_summary(
         requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
         return format_summary(report)
+    except AnalysisTimeoutError as e:
+        logger.error(f"Analysis timed out: {e}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Analysis timed out after {e.timeout_seconds} seconds",
+        )
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
@@ -464,6 +491,12 @@ async def analyze_checklist(
         requirement = body.to_requirement()
         report = _analyzer.analyze(requirement)
         return format_checklist(report)
+    except AnalysisTimeoutError as e:
+        logger.error(f"Analysis timed out: {e}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Analysis timed out after {e.timeout_seconds} seconds",
+        )
     except Exception as e:
         logger.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")

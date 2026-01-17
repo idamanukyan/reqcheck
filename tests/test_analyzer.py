@@ -2,7 +2,11 @@
 
 import pytest
 
-from reqcheck.core.analyzer import RequirementsAnalyzer, analyze_requirement
+from reqcheck.core.analyzer import (
+    AnalysisTimeoutError,
+    RequirementsAnalyzer,
+    analyze_requirement,
+)
 from reqcheck.core.config import Settings
 from reqcheck.core.models import Requirement, Severity
 
@@ -195,3 +199,40 @@ class TestScoring:
 
         # Overall should be weighted average
         assert report.scores.overall > 0
+
+
+class TestTimeout:
+    """Tests for analysis timeout functionality."""
+
+    def test_timeout_error_attributes(self):
+        """Test AnalysisTimeoutError has correct attributes."""
+        error = AnalysisTimeoutError(30)
+        assert error.timeout_seconds == 30
+        assert "30 seconds" in str(error)
+
+    def test_timeout_error_custom_message(self):
+        """Test AnalysisTimeoutError with custom message."""
+        error = AnalysisTimeoutError(60, "Custom timeout message")
+        assert error.timeout_seconds == 60
+        assert error.message == "Custom timeout message"
+
+    def test_analysis_completes_within_timeout(self, settings):
+        """Test that normal analysis completes within timeout."""
+        # Set a reasonable timeout
+        settings_with_timeout = Settings(
+            enable_llm_analysis=False,
+            enable_rule_based_analysis=True,
+            analysis_timeout=30,
+        )
+        analyzer = RequirementsAnalyzer(settings_with_timeout)
+
+        requirement = Requirement(
+            title="Test requirement",
+            description="A simple test description for timeout testing.",
+            acceptance_criteria=["Test passes within timeout"],
+        )
+
+        # Should complete without raising AnalysisTimeoutError
+        report = analyzer.analyze(requirement)
+        assert report is not None
+        assert report.requirement_title == "Test requirement"
