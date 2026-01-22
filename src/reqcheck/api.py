@@ -117,10 +117,6 @@ class BatchResponse(BaseModel):
     blocker_count: int
 
 
-# Global state
-_analyzer: RequirementsAnalyzer | None = None
-_settings: Settings | None = None
-
 # Load settings at module level for CORS configuration (middleware must be configured at startup)
 _startup_settings = get_settings()
 
@@ -134,16 +130,17 @@ api_key_header = APIKeyHeader(name=_startup_settings.auth_header_name, auto_erro
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    global _analyzer, _settings
-    _settings = get_settings()
-    _analyzer = RequirementsAnalyzer(_settings)
+    # Store settings and analyzer in app.state for thread-safe access
+    app.state.settings = get_settings()
+    app.state.analyzer = RequirementsAnalyzer(app.state.settings)
 
     # Configure rate limiter based on settings
-    if _settings.rate_limit_enabled:
+    if app.state.settings.rate_limit_enabled:
         limiter.enabled = True
         logger.info(
-            f"Rate limiting enabled: default={_settings.rate_limit_default}, "
-            f"analyze={_settings.rate_limit_analyze}, batch={_settings.rate_limit_batch}"
+            f"Rate limiting enabled: default={app.state.settings.rate_limit_default}, "
+            f"analyze={app.state.settings.rate_limit_analyze}, "
+            f"batch={app.state.settings.rate_limit_batch}"
         )
     else:
         limiter.enabled = False
@@ -178,27 +175,41 @@ app.add_middleware(
 
 def _get_default_limit() -> str:
     """Get default rate limit from settings."""
-    settings = _settings or get_settings()
-    return settings.rate_limit_default
+    return _startup_settings.rate_limit_default
 
 
 def _get_analyze_limit() -> str:
     """Get analyze rate limit from settings."""
-    settings = _settings or get_settings()
-    return settings.rate_limit_analyze
+    return _startup_settings.rate_limit_analyze
 
 
 def _get_batch_limit() -> str:
     """Get batch rate limit from settings."""
-    settings = _settings or get_settings()
-    return settings.rate_limit_batch
+    return _startup_settings.rate_limit_batch
+
+
+def get_current_settings(request: Request) -> Settings:
+    """Dependency to get settings from app.state (thread-safe)."""
+    if hasattr(request.app.state, "settings"):
+        return request.app.state.settings
+    return get_settings()
+
+
+def get_analyzer(request: Request) -> RequirementsAnalyzer:
+    """Dependency to get analyzer from app.state (thread-safe)."""
+    if hasattr(request.app.state, "analyzer"):
+        return request.app.state.analyzer
+    # Fallback for testing or if lifespan hasn't run
+    settings = get_current_settings(request)
+    return RequirementsAnalyzer(settings)
 
 
 async def verify_api_key(
+    request: Request,
     api_key: str | None = Security(api_key_header),
 ) -> str | None:
     """Verify API key if authentication is enabled."""
-    settings = _settings or get_settings()
+    settings = get_current_settings(request)
 
     # If auth is disabled, allow all requests
     if not settings.auth_enabled:
@@ -268,9 +279,11 @@ def validate_requirement_size(body: RequirementRequest, settings: Settings) -> N
 
 @app.get("/health", response_model=HealthResponse)
 @limiter.limit(_get_default_limit)
-async def health_check(request: Request):
+async def health_check(
+    request: Request,
+    settings: Settings = Depends(get_current_settings),
+):
     """Check API health status."""
-    settings = _settings or get_settings()
     return HealthResponse(
         status="healthy",
         version="0.1.0",
@@ -283,6 +296,8 @@ async def health_check(request: Request):
 async def analyze_requirement(
     request: Request,
     body: RequirementRequest,
+    settings: Settings = Depends(get_current_settings),
+    analyzer: RequirementsAnalyzer = Depends(get_analyzer),
     api_key: str | None = Depends(verify_api_key),
 ):
     """
@@ -293,20 +308,12 @@ async def analyze_requirement(
     - Scores for ambiguity, completeness, and testability
     - Executive summary and recommendations
     """
-    global _analyzer, _settings
-
-    if _settings is None:
-        _settings = get_settings()
-
     # Validate request size
-    validate_requirement_size(body, _settings)
-
-    if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(_settings)
+    validate_requirement_size(body, settings)
 
     try:
         requirement = body.to_requirement()
-        report = _analyzer.analyze(requirement)
+        report = analyzer.analyze(requirement)
         return AnalysisResponse.from_report(report)
     except AnalysisTimeoutError as e:
         logger.error(f"Analysis timed out: {e}")
@@ -324,6 +331,8 @@ async def analyze_requirement(
 async def analyze_batch(
     request: Request,
     body: BatchRequest,
+    settings: Settings = Depends(get_current_settings),
+    analyzer: RequirementsAnalyzer = Depends(get_analyzer),
     api_key: str | None = Depends(verify_api_key),
 ):
     """
@@ -331,17 +340,9 @@ async def analyze_batch(
 
     Limited to 10 requirements per request.
     """
-    global _analyzer, _settings
-
-    if _settings is None:
-        _settings = get_settings()
-
     # Validate each requirement in batch
     for req in body.requirements:
-        validate_requirement_size(req, _settings)
-
-    if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(_settings)
+        validate_requirement_size(req, settings)
 
     results = []
     total_blockers = 0
@@ -350,7 +351,7 @@ async def analyze_batch(
     for req in body.requirements:
         try:
             requirement = req.to_requirement()
-            report = _analyzer.analyze(requirement)
+            report = analyzer.analyze(requirement)
             response = AnalysisResponse.from_report(report)
             results.append(response)
 
@@ -387,6 +388,8 @@ async def analyze_markdown(
     request: Request,
     body: RequirementRequest,
     include_evidence: bool = Query(default=True, description="Include evidence snippets"),
+    settings: Settings = Depends(get_current_settings),
+    analyzer: RequirementsAnalyzer = Depends(get_analyzer),
     api_key: str | None = Depends(verify_api_key),
 ):
     """
@@ -394,24 +397,16 @@ async def analyze_markdown(
 
     Useful for integration with documentation systems.
     """
-    global _analyzer, _settings
-
-    if _settings is None:
-        _settings = get_settings()
-
     # Validate request size
-    validate_requirement_size(body, _settings)
-
-    if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(_settings)
+    validate_requirement_size(body, settings)
 
     try:
         requirement = body.to_requirement()
-        report = _analyzer.analyze(requirement)
+        report = analyzer.analyze(requirement)
 
-        # Create a copy of settings to avoid mutating global state
+        # Create a copy of settings for formatting with custom include_evidence
         format_settings = Settings(
-            **{k: v for k, v in _settings.model_dump().items() if k != "include_evidence"},
+            **{k: v for k, v in settings.model_dump().items() if k != "include_evidence"},
             include_evidence=include_evidence,
         )
         return format_markdown(report, format_settings)
@@ -431,6 +426,8 @@ async def analyze_markdown(
 async def analyze_summary(
     request: Request,
     body: RequirementRequest,
+    settings: Settings = Depends(get_current_settings),
+    analyzer: RequirementsAnalyzer = Depends(get_analyzer),
     api_key: str | None = Depends(verify_api_key),
 ):
     """
@@ -438,20 +435,12 @@ async def analyze_summary(
 
     Useful for CI/CD integration or quick checks.
     """
-    global _analyzer, _settings
-
-    if _settings is None:
-        _settings = get_settings()
-
     # Validate request size
-    validate_requirement_size(body, _settings)
-
-    if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(_settings)
+    validate_requirement_size(body, settings)
 
     try:
         requirement = body.to_requirement()
-        report = _analyzer.analyze(requirement)
+        report = analyzer.analyze(requirement)
         return format_summary(report)
     except AnalysisTimeoutError as e:
         logger.error(f"Analysis timed out: {e}")
@@ -469,6 +458,8 @@ async def analyze_summary(
 async def analyze_checklist(
     request: Request,
     body: RequirementRequest,
+    settings: Settings = Depends(get_current_settings),
+    analyzer: RequirementsAnalyzer = Depends(get_analyzer),
     api_key: str | None = Depends(verify_api_key),
 ):
     """
@@ -476,20 +467,12 @@ async def analyze_checklist(
 
     Useful for quick pass/fail checks.
     """
-    global _analyzer, _settings
-
-    if _settings is None:
-        _settings = get_settings()
-
     # Validate request size
-    validate_requirement_size(body, _settings)
-
-    if _analyzer is None:
-        _analyzer = RequirementsAnalyzer(_settings)
+    validate_requirement_size(body, settings)
 
     try:
         requirement = body.to_requirement()
-        report = _analyzer.analyze(requirement)
+        report = analyzer.analyze(requirement)
         return format_checklist(report)
     except AnalysisTimeoutError as e:
         logger.error(f"Analysis timed out: {e}")
@@ -504,12 +487,11 @@ async def analyze_checklist(
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Create FastAPI app with custom settings (for testing)."""
-    global _analyzer, _settings
-    _settings = settings or get_settings()
-    _analyzer = RequirementsAnalyzer(_settings)
+    app.state.settings = settings or get_settings()
+    app.state.analyzer = RequirementsAnalyzer(app.state.settings)
 
     # Configure rate limiter based on settings
-    limiter.enabled = _settings.rate_limit_enabled
+    limiter.enabled = app.state.settings.rate_limit_enabled
 
     return app
 
