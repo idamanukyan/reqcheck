@@ -2,9 +2,18 @@
 
 import json
 import logging
+import random
+import time
 from typing import Any
 
-from openai import OpenAI, OpenAIError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    OpenAI,
+    OpenAIError,
+    RateLimitError,
+)
 
 from reqcheck.core.config import Settings, get_settings
 from reqcheck.llm.prompts import PromptTemplates
@@ -25,37 +34,115 @@ class LLMClient:
         self._settings = settings or get_settings()
         self._client: OpenAI | None = None
 
+    # Error types that should trigger a retry
+    RETRYABLE_ERRORS = (
+        APIConnectionError,
+        APITimeoutError,
+        RateLimitError,
+        InternalServerError,
+    )
+
     @property
     def client(self) -> OpenAI:
         """Lazy-initialize OpenAI client."""
         if self._client is None:
             if not self._settings.openai_api_key:
                 raise LLMClientError(
-                    "OpenAI API key not configured. Set QA_AGENT_OPENAI_API_KEY environment variable."
+                    "OpenAI API key not configured. "
+                    "Set REQCHECK_OPENAI_API_KEY environment variable."
                 )
             self._client = OpenAI(api_key=self._settings.openai_api_key)
         return self._client
 
+    def _calculate_backoff_delay(self, attempt: int) -> float:
+        """Calculate delay with exponential backoff and jitter.
+
+        Args:
+            attempt: The current attempt number (0-indexed).
+
+        Returns:
+            Delay in seconds before the next retry.
+        """
+        base_delay = self._settings.llm_retry_base_delay
+        max_delay = self._settings.llm_retry_max_delay
+
+        # Exponential backoff: base_delay * 2^attempt
+        delay = base_delay * (2**attempt)
+
+        # Add jitter (±25% randomization) to prevent thundering herd
+        jitter = delay * 0.25 * (2 * random.random() - 1)
+        delay += jitter
+
+        # Cap at maximum delay
+        return min(delay, max_delay)
+
+    def _is_retryable_error(self, error: OpenAIError) -> bool:
+        """Check if an error is retryable.
+
+        Args:
+            error: The OpenAI error to check.
+
+        Returns:
+            True if the error is retryable, False otherwise.
+        """
+        return isinstance(error, self.RETRYABLE_ERRORS)
+
     def _call_api(self, user_prompt: str) -> str:
-        """Make API call with error handling."""
-        try:
-            response = self.client.chat.completions.create(
-                model=self._settings.openai_model,
-                messages=[
-                    {"role": "system", "content": PromptTemplates.SYSTEM},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=self._settings.openai_temperature,
-                max_tokens=self._settings.openai_max_tokens,
-                response_format={"type": "json_object"},
-            )
-            content = response.choices[0].message.content
-            if content is None:
-                raise LLMClientError("Empty response from API")
-            return content
-        except OpenAIError as e:
-            logger.error(f"OpenAI API error: {e}")
-            raise LLMClientError(f"API call failed: {e}") from e
+        """Make API call with retry logic and exponential backoff.
+
+        Args:
+            user_prompt: The prompt to send to the API.
+
+        Returns:
+            The API response content.
+
+        Raises:
+            LLMClientError: If all retry attempts fail or a non-retryable error occurs.
+        """
+        max_retries = self._settings.llm_max_retries
+        last_error: OpenAIError | None = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self._settings.openai_model,
+                    messages=[
+                        {"role": "system", "content": PromptTemplates.SYSTEM},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=self._settings.openai_temperature,
+                    max_tokens=self._settings.openai_max_tokens,
+                    response_format={"type": "json_object"},
+                )
+                content = response.choices[0].message.content
+                if content is None:
+                    raise LLMClientError("Empty response from API")
+                return content
+
+            except OpenAIError as e:
+                last_error = e
+
+                if not self._is_retryable_error(e):
+                    logger.error(f"OpenAI API error (non-retryable): {e}")
+                    raise LLMClientError(f"API call failed: {e}") from e
+
+                if attempt < max_retries:
+                    delay = self._calculate_backoff_delay(attempt)
+                    logger.warning(
+                        f"OpenAI API error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"Retrying in {delay:.2f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(
+                        f"OpenAI API error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
+                        f"No more retries."
+                    )
+
+        # All retries exhausted
+        raise LLMClientError(
+            f"API call failed after {max_retries + 1} attempts: {last_error}"
+        ) from last_error
 
     def _parse_json_response(self, response: str) -> dict[str, Any]:
         """Parse JSON response with error handling."""

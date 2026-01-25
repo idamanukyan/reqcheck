@@ -36,6 +36,26 @@ class Settings(BaseSettings):
         description="Maximum tokens in response",
     )
 
+    # LLM Retry Configuration
+    llm_max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Maximum number of retry attempts for LLM API calls",
+    )
+    llm_retry_base_delay: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=10.0,
+        description="Base delay in seconds for exponential backoff",
+    )
+    llm_retry_max_delay: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=120.0,
+        description="Maximum delay in seconds between retries",
+    )
+
     # Analysis Configuration
     enable_llm_analysis: bool = Field(
         default=True,

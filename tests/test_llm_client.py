@@ -4,7 +4,14 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from openai import APIConnectionError, APITimeoutError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    RateLimitError,
+)
 
 from reqcheck.core.config import Settings
 from reqcheck.llm.client import LLMClient, LLMClientError
@@ -109,7 +116,7 @@ class TestAPIKeyValidation:
             _ = client.client
 
         assert "OpenAI API key not configured" in str(exc_info.value)
-        assert "QA_AGENT_OPENAI_API_KEY" in str(exc_info.value)
+        assert "REQCHECK_OPENAI_API_KEY" in str(exc_info.value)
 
     def test_empty_api_key_raises_error(self):
         """Test that empty string API key raises LLMClientError."""
@@ -489,3 +496,305 @@ class TestEdgeCases:
             result = llm_client.analyze_ambiguity("Test")
             assert result["unexpected_field"] == "should be preserved"
             assert result["another_field"] == 123
+
+
+class TestRetryLogic:
+    """Tests for LLM client retry logic with exponential backoff."""
+
+    @pytest.fixture
+    def settings_with_retries(self):
+        """Create test settings with retry configuration."""
+        return Settings(
+            openai_api_key="test-api-key-12345",
+            llm_max_retries=3,
+            llm_retry_base_delay=0.1,  # Minimum allowed value
+            llm_retry_max_delay=1.0,   # Minimum allowed value
+        )
+
+    @pytest.fixture
+    def settings_no_retries(self):
+        """Create test settings with no retries."""
+        return Settings(
+            openai_api_key="test-api-key-12345",
+            llm_max_retries=0,
+        )
+
+    @pytest.fixture
+    def client_with_retries(self, settings_with_retries):
+        """Create LLM client with retry settings."""
+        return LLMClient(settings_with_retries)
+
+    @pytest.fixture
+    def client_no_retries(self, settings_no_retries):
+        """Create LLM client with no retries."""
+        return LLMClient(settings_no_retries)
+
+    def test_successful_on_first_attempt(self, client_with_retries, mock_openai_response):
+        """Test that successful first attempt does not trigger retries."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+            mock_client.chat.completions.create.return_value = mock_openai_response
+
+            result = client_with_retries._call_api("test prompt")
+
+            assert "issues" in result
+            mock_client.chat.completions.create.assert_called_once()
+
+    def test_retry_on_rate_limit_error(self, client_with_retries, mock_openai_response):
+        """Test retry on RateLimitError."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+
+            # Fail twice, succeed on third attempt
+            mock_client.chat.completions.create.side_effect = [
+                RateLimitError(
+                    message="Rate limit exceeded",
+                    response=mock_response,
+                    body={"error": {"message": "Rate limit exceeded"}},
+                ),
+                RateLimitError(
+                    message="Rate limit exceeded",
+                    response=mock_response,
+                    body={"error": {"message": "Rate limit exceeded"}},
+                ),
+                mock_openai_response,
+            ]
+
+            with patch("time.sleep"):  # Don't actually sleep in tests
+                result = client_with_retries._call_api("test prompt")
+
+            assert "issues" in result
+            assert mock_client.chat.completions.create.call_count == 3
+
+    def test_retry_on_timeout_error(self, client_with_retries, mock_openai_response):
+        """Test retry on APITimeoutError."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+
+            # Fail once, succeed on second attempt
+            mock_client.chat.completions.create.side_effect = [
+                APITimeoutError(request=MagicMock()),
+                mock_openai_response,
+            ]
+
+            with patch("time.sleep"):
+                result = client_with_retries._call_api("test prompt")
+
+            assert "issues" in result
+            assert mock_client.chat.completions.create.call_count == 2
+
+    def test_retry_on_connection_error(self, client_with_retries, mock_openai_response):
+        """Test retry on APIConnectionError."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+
+            mock_client.chat.completions.create.side_effect = [
+                APIConnectionError(request=MagicMock()),
+                mock_openai_response,
+            ]
+
+            with patch("time.sleep"):
+                result = client_with_retries._call_api("test prompt")
+
+            assert "issues" in result
+            assert mock_client.chat.completions.create.call_count == 2
+
+    def test_retry_on_internal_server_error(self, client_with_retries, mock_openai_response):
+        """Test retry on InternalServerError (500)."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+            mock_response = MagicMock()
+            mock_response.status_code = 500
+
+            mock_client.chat.completions.create.side_effect = [
+                InternalServerError(
+                    message="Internal server error",
+                    response=mock_response,
+                    body={"error": {"message": "Internal server error"}},
+                ),
+                mock_openai_response,
+            ]
+
+            with patch("time.sleep"):
+                result = client_with_retries._call_api("test prompt")
+
+            assert "issues" in result
+            assert mock_client.chat.completions.create.call_count == 2
+
+    def test_no_retry_on_authentication_error(self, client_with_retries):
+        """Test no retry on AuthenticationError (non-retryable)."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+
+            mock_client.chat.completions.create.side_effect = AuthenticationError(
+                message="Invalid API key",
+                response=mock_response,
+                body={"error": {"message": "Invalid API key"}},
+            )
+
+            with pytest.raises(LLMClientError) as exc_info:
+                client_with_retries._call_api("test prompt")
+
+            assert "API call failed" in str(exc_info.value)
+            # Should only attempt once (no retries)
+            mock_client.chat.completions.create.assert_called_once()
+
+    def test_no_retry_on_bad_request_error(self, client_with_retries):
+        """Test no retry on BadRequestError (non-retryable)."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+            mock_response = MagicMock()
+            mock_response.status_code = 400
+
+            mock_client.chat.completions.create.side_effect = BadRequestError(
+                message="Bad request",
+                response=mock_response,
+                body={"error": {"message": "Bad request"}},
+            )
+
+            with pytest.raises(LLMClientError) as exc_info:
+                client_with_retries._call_api("test prompt")
+
+            assert "API call failed" in str(exc_info.value)
+            mock_client.chat.completions.create.assert_called_once()
+
+    def test_all_retries_exhausted(self, client_with_retries):
+        """Test error raised after all retries exhausted."""
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+
+            # Always fail with rate limit error
+            mock_client.chat.completions.create.side_effect = RateLimitError(
+                message="Rate limit exceeded",
+                response=mock_response,
+                body={"error": {"message": "Rate limit exceeded"}},
+            )
+
+            with patch("time.sleep"):
+                with pytest.raises(LLMClientError) as exc_info:
+                    client_with_retries._call_api("test prompt")
+
+            assert "after 4 attempts" in str(exc_info.value)  # 1 initial + 3 retries
+            assert mock_client.chat.completions.create.call_count == 4
+
+    def test_no_retries_when_disabled(self, client_no_retries):
+        """Test no retries when max_retries is 0."""
+        with patch.object(client_no_retries, "_client", create=True) as mock_client:
+            client_no_retries._client = mock_client
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+
+            mock_client.chat.completions.create.side_effect = RateLimitError(
+                message="Rate limit exceeded",
+                response=mock_response,
+                body={"error": {"message": "Rate limit exceeded"}},
+            )
+
+            with pytest.raises(LLMClientError) as exc_info:
+                client_no_retries._call_api("test prompt")
+
+            assert "after 1 attempts" in str(exc_info.value)
+            mock_client.chat.completions.create.assert_called_once()
+
+    def test_backoff_delay_calculation(self, client_with_retries):
+        """Test exponential backoff delay calculation."""
+        # Attempt 0: base_delay * 2^0 = 0.1 * 1 = 0.1s (±jitter)
+        delay_0 = client_with_retries._calculate_backoff_delay(0)
+        assert 0.075 <= delay_0 <= 0.125  # 0.1 ± 25%
+
+        # Attempt 1: base_delay * 2^1 = 0.1 * 2 = 0.2s (±jitter)
+        delay_1 = client_with_retries._calculate_backoff_delay(1)
+        assert 0.15 <= delay_1 <= 0.25  # 0.2 ± 25%
+
+        # Attempt 2: base_delay * 2^2 = 0.1 * 4 = 0.4s (±jitter)
+        delay_2 = client_with_retries._calculate_backoff_delay(2)
+        assert 0.3 <= delay_2 <= 0.5  # 0.4 ± 25%
+
+    def test_backoff_delay_respects_max_delay(self, settings_with_retries):
+        """Test that backoff delay is capped at max_delay."""
+        settings = Settings(
+            openai_api_key="test-api-key",
+            llm_retry_base_delay=1.0,
+            llm_retry_max_delay=5.0,
+        )
+        client = LLMClient(settings)
+
+        # Attempt 10: base_delay * 2^10 = 1024s, but should be capped at 5s
+        delay = client._calculate_backoff_delay(10)
+        assert delay <= 5.0
+
+    def test_is_retryable_error(self, client_with_retries):
+        """Test _is_retryable_error correctly identifies retryable errors."""
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+
+        # Retryable errors
+        assert client_with_retries._is_retryable_error(
+            RateLimitError(message="", response=mock_response, body={})
+        )
+        assert client_with_retries._is_retryable_error(
+            APITimeoutError(request=MagicMock())
+        )
+        assert client_with_retries._is_retryable_error(
+            APIConnectionError(request=MagicMock())
+        )
+        assert client_with_retries._is_retryable_error(
+            InternalServerError(message="", response=mock_response, body={})
+        )
+
+        # Non-retryable errors
+        mock_response.status_code = 401
+        assert not client_with_retries._is_retryable_error(
+            AuthenticationError(message="", response=mock_response, body={})
+        )
+        mock_response.status_code = 400
+        assert not client_with_retries._is_retryable_error(
+            BadRequestError(message="", response=mock_response, body={})
+        )
+
+    def test_retry_logs_warnings(self, client_with_retries, mock_openai_response, caplog):
+        """Test that retries are logged as warnings."""
+        import logging
+
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+
+            mock_client.chat.completions.create.side_effect = [
+                APITimeoutError(request=MagicMock()),
+                mock_openai_response,
+            ]
+
+            with patch("time.sleep"):
+                with caplog.at_level(logging.WARNING):
+                    client_with_retries._call_api("test prompt")
+
+            assert "Retrying" in caplog.text
+            assert "attempt 1/4" in caplog.text
+
+    def test_final_failure_logs_error(self, client_with_retries, caplog):
+        """Test that final failure is logged as error."""
+        import logging
+
+        with patch.object(client_with_retries, "_client", create=True) as mock_client:
+            client_with_retries._client = mock_client
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+
+            mock_client.chat.completions.create.side_effect = RateLimitError(
+                message="Rate limit exceeded",
+                response=mock_response,
+                body={"error": {"message": "Rate limit exceeded"}},
+            )
+
+            with patch("time.sleep"):
+                with caplog.at_level(logging.ERROR):
+                    with pytest.raises(LLMClientError):
+                        client_with_retries._call_api("test prompt")
+
+            assert "No more retries" in caplog.text
