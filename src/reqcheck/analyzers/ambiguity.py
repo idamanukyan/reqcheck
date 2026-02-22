@@ -1,7 +1,5 @@
 """Ambiguity detection analyzer."""
 
-import logging
-
 from reqcheck.analyzers.base import BaseAnalyzer
 from reqcheck.core.constants import (
     PENALTY_REDUCTION_FACTOR_LONG_TEXT,
@@ -12,10 +10,11 @@ from reqcheck.core.constants import (
     TEXT_LENGTH_LONG_THRESHOLD,
     get_severity_weights,
 )
+from reqcheck.core.exceptions import LLMClientError
+from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement
-from reqcheck.llm.client import LLMClientError
 
-logger = logging.getLogger(__name__)
+logger = get_logger("analyzers.ambiguity")
 
 
 class AmbiguityAnalyzer(BaseAnalyzer):
@@ -41,7 +40,10 @@ class AmbiguityAnalyzer(BaseAnalyzer):
         # Run rule-based analysis
         if self._settings.enable_rule_based_analysis:
             rule_issues = self._run_rule_based_analysis(requirement)
-            logger.debug(f"Rule-based analysis found {len(rule_issues)} ambiguity issues")
+            logger.debug(
+                "Rule-based analysis complete",
+                extra={"issue_count": len(rule_issues)},
+            )
 
         # Run LLM analysis
         if self._settings.llm_available:
@@ -49,9 +51,15 @@ class AmbiguityAnalyzer(BaseAnalyzer):
                 response = self.llm_client.analyze_ambiguity(requirement.full_text)
                 llm_issues = self._parse_llm_issues(response, self.category)
                 score = response.get("ambiguity_score", SCORE_DEFAULT_LLM_FALLBACK)
-                logger.debug(f"LLM analysis found {len(llm_issues)} ambiguity issues")
+                logger.debug(
+                    "LLM analysis complete",
+                    extra={"issue_count": len(llm_issues), "score": score},
+                )
             except LLMClientError as e:
-                logger.warning(f"LLM analysis failed: {e}")
+                logger.warning(
+                    "LLM analysis failed, using rule-based scoring",
+                    extra={"error": str(e)},
+                )
                 # Fall back to rule-based score estimation
                 score = self._estimate_score_from_rules(rule_issues, requirement)
 

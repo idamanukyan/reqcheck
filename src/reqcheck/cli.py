@@ -12,7 +12,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from reqcheck.core.analyzer import RequirementsAnalyzer
-from reqcheck.core.config import Settings, get_settings
+from reqcheck.core.config import get_settings
 from reqcheck.core.models import Requirement
 from reqcheck.output.formatters import (
     format_checklist,

@@ -1,7 +1,6 @@
 """OpenAI client wrapper for LLM-powered analysis."""
 
 import json
-import logging
 import random
 import time
 from typing import Any
@@ -16,15 +15,16 @@ from openai import (
 )
 
 from reqcheck.core.config import Settings, get_settings
+from reqcheck.core.exceptions import (
+    LLMClientError,
+    LLMConfigurationError,
+    LLMRateLimitError,
+    LLMResponseError,
+)
+from reqcheck.core.logging import get_logger
 from reqcheck.llm.prompts import PromptTemplates
 
-logger = logging.getLogger(__name__)
-
-
-class LLMClientError(Exception):
-    """Error during LLM API call."""
-
-    pass
+logger = get_logger("llm.client")
 
 
 class LLMClient:
@@ -47,10 +47,7 @@ class LLMClient:
         """Lazy-initialize OpenAI client."""
         if self._client is None:
             if not self._settings.openai_api_key:
-                raise LLMClientError(
-                    "OpenAI API key not configured. "
-                    "Set REQCHECK_OPENAI_API_KEY environment variable."
-                )
+                raise LLMConfigurationError("OPENAI_API_KEY")
             self._client = OpenAI(api_key=self._settings.openai_api_key)
         return self._client
 
@@ -116,32 +113,59 @@ class LLMClient:
                 )
                 content = response.choices[0].message.content
                 if content is None:
-                    raise LLMClientError("Empty response from API")
+                    raise LLMResponseError("Empty response from API")
                 return content
 
             except OpenAIError as e:
                 last_error = e
 
                 if not self._is_retryable_error(e):
-                    logger.error(f"OpenAI API error (non-retryable): {e}")
-                    raise LLMClientError(f"API call failed: {e}") from e
+                    logger.error(
+                        "OpenAI API error (non-retryable)",
+                        extra={
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                            "retryable": False,
+                        },
+                    )
+                    raise LLMClientError(
+                        f"API call failed: {e}",
+                        provider="openai",
+                        retryable=False,
+                    ) from e
 
                 if attempt < max_retries:
                     delay = self._calculate_backoff_delay(attempt)
                     logger.warning(
-                        f"OpenAI API error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                        f"Retrying in {delay:.2f}s..."
+                        "OpenAI API error, retrying",
+                        extra={
+                            "attempt": attempt + 1,
+                            "max_attempts": max_retries + 1,
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                            "retry_delay_seconds": round(delay, 2),
+                        },
                     )
                     time.sleep(delay)
                 else:
                     logger.error(
-                        f"OpenAI API error (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                        f"No more retries."
+                        "OpenAI API error, no more retries",
+                        extra={
+                            "attempt": attempt + 1,
+                            "max_attempts": max_retries + 1,
+                            "error": str(e),
+                            "error_type": type(e).__name__,
+                        },
                     )
 
-        # All retries exhausted
+        # All retries exhausted - check if it was a rate limit
+        if isinstance(last_error, RateLimitError):
+            raise LLMRateLimitError() from last_error
+
         raise LLMClientError(
-            f"API call failed after {max_retries + 1} attempts: {last_error}"
+            f"API call failed after {max_retries + 1} attempts: {last_error}",
+            provider="openai",
+            retryable=True,
         ) from last_error
 
     def _parse_json_response(self, response: str) -> dict[str, Any]:
@@ -149,9 +173,15 @@ class LLMClient:
         try:
             return json.loads(response)
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON response: {e}")
-            logger.debug(f"Raw response: {response}")
-            raise LLMClientError(f"Invalid JSON response: {e}") from e
+            logger.error(
+                "Failed to parse JSON response",
+                extra={
+                    "error": str(e),
+                    "response_length": len(response),
+                    "response_preview": response[:200] if response else "(empty)",
+                },
+            )
+            raise LLMResponseError(f"Invalid JSON response: {e}", raw_response=response) from e
 
     def analyze_ambiguity(self, requirement_text: str) -> dict[str, Any]:
         """Analyze requirement for ambiguity issues."""

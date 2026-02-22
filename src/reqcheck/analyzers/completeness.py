@@ -1,7 +1,5 @@
 """Completeness checking analyzer."""
 
-import logging
-
 from reqcheck.analyzers.base import BaseAnalyzer
 from reqcheck.core.constants import (
     MIN_ACCEPTANCE_CRITERIA_COUNT,
@@ -14,10 +12,11 @@ from reqcheck.core.constants import (
     SEVERITY_WEIGHT_DEFAULT,
     get_completeness_severity_weights,
 )
+from reqcheck.core.exceptions import LLMClientError
+from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
-from reqcheck.llm.client import LLMClientError
 
-logger = logging.getLogger(__name__)
+logger = get_logger("analyzers.completeness")
 
 
 class CompletenessAnalyzer(BaseAnalyzer):
@@ -54,7 +53,10 @@ class CompletenessAnalyzer(BaseAnalyzer):
         if self._settings.enable_rule_based_analysis:
             pattern_issues = self._run_rule_based_analysis(requirement)
             rule_issues.extend(pattern_issues)
-            logger.debug(f"Rule-based analysis found {len(rule_issues)} completeness issues")
+            logger.debug(
+                "Rule-based analysis complete",
+                extra={"issue_count": len(rule_issues)},
+            )
 
         # Run LLM analysis
         if self._settings.llm_available:
@@ -75,9 +77,15 @@ class CompletenessAnalyzer(BaseAnalyzer):
                         )
                     )
 
-                logger.debug(f"LLM analysis found {len(llm_issues)} completeness issues")
+                logger.debug(
+                    "LLM analysis complete",
+                    extra={"issue_count": len(llm_issues), "score": score},
+                )
             except LLMClientError as e:
-                logger.warning(f"LLM analysis failed: {e}")
+                logger.warning(
+                    "LLM analysis failed, using rule-based scoring",
+                    extra={"error": str(e)},
+                )
                 score = self._estimate_score_from_rules(rule_issues, requirement)
 
         # Merge and deduplicate

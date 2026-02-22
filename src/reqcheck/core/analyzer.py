@@ -1,15 +1,16 @@
 """Main analyzer orchestrator."""
 
-import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from typing import Any
+from typing import Any, Callable
 
 from reqcheck.analyzers.ambiguity import AmbiguityAnalyzer
 from reqcheck.analyzers.completeness import CompletenessAnalyzer
 from reqcheck.analyzers.risk import RiskAnalyzer
 from reqcheck.analyzers.testability import TestabilityAnalyzer
 from reqcheck.core.config import Settings, get_settings
+from reqcheck.core.exceptions import AnalysisTimeoutError, LLMClientError
+from reqcheck.core.logging import get_logger, log_context, log_timing
 from reqcheck.core.models import (
     AnalysisReport,
     Issue,
@@ -18,18 +19,12 @@ from reqcheck.core.models import (
     ScoreBreakdown,
     Severity,
 )
-from reqcheck.llm.client import LLMClient, LLMClientError
+from reqcheck.llm.client import LLMClient
 
-logger = logging.getLogger(__name__)
+logger = get_logger("analyzer")
 
-
-class AnalysisTimeoutError(Exception):
-    """Raised when analysis exceeds the configured timeout."""
-
-    def __init__(self, timeout_seconds: int, message: str | None = None):
-        self.timeout_seconds = timeout_seconds
-        self.message = message or f"Analysis timed out after {timeout_seconds} seconds"
-        super().__init__(self.message)
+# Number of parallel workers for analyzer execution
+ANALYZER_WORKERS = 4
 
 
 class RequirementsAnalyzer:
@@ -70,78 +65,118 @@ class RequirementsAnalyzer:
             AnalysisTimeoutError: If analysis exceeds the configured timeout
         """
         timeout = self._settings.analysis_timeout
-        logger.info(
-            f"Analyzing requirement: {requirement.id} - {requirement.title[:50]} "
-            f"(timeout: {timeout}s)"
-        )
 
-        # Run analysis with timeout enforcement
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(self._analyze_internal, requirement)
-            try:
-                return future.result(timeout=timeout)
-            except FuturesTimeoutError:
-                logger.error(
-                    f"Analysis timed out after {timeout}s for requirement: "
-                    f"{requirement.id}"
-                )
-                raise AnalysisTimeoutError(timeout)
+        with log_context(requirement_id=requirement.id):
+            logger.info(
+                "Starting requirement analysis",
+                extra={
+                    "title": requirement.title[:50],
+                    "timeout_seconds": timeout,
+                    "llm_enabled": self._settings.llm_available,
+                },
+            )
+
+            # Run analysis with timeout enforcement
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self._analyze_internal, requirement)
+                try:
+                    with log_timing(logger, "full_analysis"):
+                        return future.result(timeout=timeout)
+                except FuturesTimeoutError:
+                    logger.error(
+                        "Analysis timed out",
+                        extra={"timeout_seconds": timeout},
+                    )
+                    raise AnalysisTimeoutError(timeout, requirement_id=requirement.id)
 
     def _analyze_internal(self, requirement: Requirement) -> AnalysisReport:
         """
         Internal analysis logic without timeout wrapper.
 
         This method contains the actual analysis pipeline.
+        Analyzers are run in parallel for improved performance.
         """
         all_issues: list[Issue] = []
         scores = ScoreBreakdown()
 
-        # Run ambiguity analysis
-        try:
-            ambiguity_issues, scores.ambiguity = self._ambiguity_analyzer.analyze(
-                requirement
-            )
-            all_issues.extend(ambiguity_issues)
-            logger.debug(
-                f"Ambiguity: {len(ambiguity_issues)} issues, "
-                f"score: {scores.ambiguity:.2f}"
-            )
-        except Exception as e:
-            logger.error(f"Ambiguity analysis failed: {e}")
+        # Run all analyzers in parallel
+        with log_timing(logger, "parallel_analysis"):
+            results = self._run_analyzers_parallel(requirement)
 
-        # Run completeness analysis
-        try:
-            completeness_issues, scores.completeness = (
-                self._completeness_analyzer.analyze(requirement)
-            )
-            all_issues.extend(completeness_issues)
-            logger.debug(
-                f"Completeness: {len(completeness_issues)} issues, "
-                f"score: {scores.completeness:.2f}"
-            )
-        except Exception as e:
-            logger.error(f"Completeness analysis failed: {e}")
+        # Process ambiguity results
+        if "ambiguity" in results:
+            if results["ambiguity"]["success"]:
+                issues, score = results["ambiguity"]["result"]
+                all_issues.extend(issues)
+                scores.ambiguity = score
+                logger.debug(
+                    "Ambiguity analysis complete",
+                    extra={"issue_count": len(issues), "score": score},
+                )
+            else:
+                logger.error(
+                    "Ambiguity analysis failed",
+                    extra={
+                        "error": results["ambiguity"]["error"],
+                        "error_type": results["ambiguity"]["error_type"],
+                    },
+                )
 
-        # Run testability analysis
-        try:
-            testability_issues, scores.testability = (
-                self._testability_analyzer.analyze(requirement)
-            )
-            all_issues.extend(testability_issues)
-            logger.debug(
-                f"Testability: {len(testability_issues)} issues, "
-                f"score: {scores.testability:.2f}"
-            )
-        except Exception as e:
-            logger.error(f"Testability analysis failed: {e}")
+        # Process completeness results
+        if "completeness" in results:
+            if results["completeness"]["success"]:
+                issues, score = results["completeness"]["result"]
+                all_issues.extend(issues)
+                scores.completeness = score
+                logger.debug(
+                    "Completeness analysis complete",
+                    extra={"issue_count": len(issues), "score": score},
+                )
+            else:
+                logger.error(
+                    "Completeness analysis failed",
+                    extra={
+                        "error": results["completeness"]["error"],
+                        "error_type": results["completeness"]["error_type"],
+                    },
+                )
 
-        # Run risk analysis
-        try:
-            risk_issues, _ = self._risk_analyzer.analyze(requirement)
-            all_issues.extend(risk_issues)
-            logger.debug(f"Risk: {len(risk_issues)} signals identified")
-        except Exception as e:
-            logger.error(f"Risk analysis failed: {e}")
+        # Process testability results
+        if "testability" in results:
+            if results["testability"]["success"]:
+                issues, score = results["testability"]["result"]
+                all_issues.extend(issues)
+                scores.testability = score
+                logger.debug(
+                    "Testability analysis complete",
+                    extra={"issue_count": len(issues), "score": score},
+                )
+            else:
+                logger.error(
+                    "Testability analysis failed",
+                    extra={
+                        "error": results["testability"]["error"],
+                        "error_type": results["testability"]["error_type"],
+                    },
+                )
+
+        # Process risk results
+        if "risk" in results:
+            if results["risk"]["success"]:
+                issues, _ = results["risk"]["result"]
+                all_issues.extend(issues)
+                logger.debug(
+                    "Risk analysis complete",
+                    extra={"signal_count": len(issues)},
+                )
+            else:
+                logger.error(
+                    "Risk analysis failed",
+                    extra={
+                        "error": results["risk"]["error"],
+                        "error_type": results["risk"]["error_type"],
+                    },
+                )
 
         # Calculate overall score
         scores.calculate_overall()
@@ -167,15 +202,77 @@ class RequirementsAnalyzer:
             metadata={
                 "total_issues": len(sorted_issues),
                 "llm_enabled": self._settings.llm_available,
+                "parallel_execution": True,
             },
         )
 
         logger.info(
-            f"Analysis complete: {report.blocker_count} blockers, "
-            f"{report.warning_count} warnings, {report.suggestion_count} suggestions"
+            "Analysis complete",
+            extra={
+                "blocker_count": report.blocker_count,
+                "warning_count": report.warning_count,
+                "suggestion_count": report.suggestion_count,
+                "overall_score": report.scores.overall,
+                "ready_for_dev": report.is_ready_for_dev,
+            },
         )
 
         return report
+
+    def _run_analyzers_parallel(
+        self, requirement: Requirement
+    ) -> dict[str, dict[str, Any]]:
+        """
+        Run all analyzers in parallel using ThreadPoolExecutor.
+
+        Args:
+            requirement: The requirement to analyze
+
+        Returns:
+            Dictionary mapping analyzer names to their results/errors
+        """
+        analyzers: dict[str, Callable[[Requirement], tuple[list[Issue], float]]] = {
+            "ambiguity": self._ambiguity_analyzer.analyze,
+            "completeness": self._completeness_analyzer.analyze,
+            "testability": self._testability_analyzer.analyze,
+            "risk": self._risk_analyzer.analyze,
+        }
+
+        results: dict[str, dict[str, Any]] = {}
+        futures: dict[str, Future[tuple[list[Issue], float]]] = {}
+
+        logger.debug(
+            "Starting parallel analyzer execution",
+            extra={"analyzer_count": len(analyzers), "workers": ANALYZER_WORKERS},
+        )
+
+        with ThreadPoolExecutor(max_workers=ANALYZER_WORKERS) as executor:
+            # Submit all analyzer tasks
+            for name, analyzer_func in analyzers.items():
+                futures[name] = executor.submit(analyzer_func, requirement)
+
+            # Collect results
+            for name, future in futures.items():
+                try:
+                    result = future.result()
+                    results[name] = {
+                        "success": True,
+                        "result": result,
+                    }
+                except Exception as e:
+                    results[name] = {
+                        "success": False,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    }
+
+        successful = sum(1 for r in results.values() if r["success"])
+        logger.debug(
+            "Parallel analyzer execution complete",
+            extra={"successful": successful, "total": len(analyzers)},
+        )
+
+        return results
 
     def _filter_by_severity(self, issues: list[Issue]) -> list[Issue]:
         """Filter issues by minimum severity setting."""
@@ -241,7 +338,10 @@ class RequirementsAnalyzer:
                     response.get("recommendations", []),
                 )
             except LLMClientError as e:
-                logger.warning(f"LLM summary generation failed: {e}")
+                logger.warning(
+                    "LLM summary generation failed, using fallback",
+                    extra={"error": str(e), "error_type": type(e).__name__},
+                )
 
         # Fallback to rule-based summary
         return self._generate_fallback_summary(issues, scores)

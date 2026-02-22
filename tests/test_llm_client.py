@@ -14,7 +14,13 @@ from openai import (
 )
 
 from reqcheck.core.config import Settings
-from reqcheck.llm.client import LLMClient, LLMClientError
+from reqcheck.core.exceptions import (
+    LLMClientError,
+    LLMConfigurationError,
+    LLMRateLimitError,
+    LLMResponseError,
+)
+from reqcheck.llm.client import LLMClient
 
 
 @pytest.fixture
@@ -109,21 +115,21 @@ class TestAPIKeyValidation:
     """Tests for API key validation."""
 
     def test_missing_api_key_raises_error(self, settings_without_api_key):
-        """Test that missing API key raises LLMClientError."""
+        """Test that missing API key raises LLMConfigurationError."""
         client = LLMClient(settings_without_api_key)
 
-        with pytest.raises(LLMClientError) as exc_info:
+        with pytest.raises(LLMConfigurationError) as exc_info:
             _ = client.client
 
-        assert "OpenAI API key not configured" in str(exc_info.value)
-        assert "REQCHECK_OPENAI_API_KEY" in str(exc_info.value)
+        assert "OPENAI_API_KEY" in str(exc_info.value)
+        assert "not configured" in str(exc_info.value)
 
     def test_empty_api_key_raises_error(self):
-        """Test that empty string API key raises LLMClientError."""
+        """Test that empty string API key raises LLMConfigurationError."""
         settings = Settings(openai_api_key="")
         client = LLMClient(settings)
 
-        with pytest.raises(LLMClientError) as exc_info:
+        with pytest.raises(LLMConfigurationError) as exc_info:
             _ = client.client
 
         assert "not configured" in str(exc_info.value)
@@ -179,10 +185,10 @@ class TestAPICallErrorHandling:
                 body={"error": {"message": "Rate limit exceeded"}},
             )
 
-            with pytest.raises(LLMClientError) as exc_info:
+            with pytest.raises(LLMRateLimitError) as exc_info:
                 llm_client._call_api("test prompt")
 
-            assert "API call failed" in str(exc_info.value)
+            assert "Rate limit exceeded" in str(exc_info.value)
 
     def test_empty_response_error(self, llm_client):
         """Test handling of empty API response."""
@@ -193,7 +199,7 @@ class TestAPICallErrorHandling:
             mock_response.choices[0].message.content = None
             mock_client.chat.completions.create.return_value = mock_response
 
-            with pytest.raises(LLMClientError) as exc_info:
+            with pytest.raises(LLMResponseError) as exc_info:
                 llm_client._call_api("test prompt")
 
             assert "Empty response" in str(exc_info.value)
@@ -226,26 +232,26 @@ class TestJSONParsing:
         assert result["ambiguity_score"] == 0.9
 
     def test_invalid_json_raises_error(self, llm_client):
-        """Test that invalid JSON raises LLMClientError."""
+        """Test that invalid JSON raises LLMResponseError."""
         invalid_json = "{ this is not valid json }"
 
-        with pytest.raises(LLMClientError) as exc_info:
+        with pytest.raises(LLMResponseError) as exc_info:
             llm_client._parse_json_response(invalid_json)
 
         assert "Invalid JSON response" in str(exc_info.value)
 
     def test_malformed_json_raises_error(self, llm_client):
-        """Test that malformed JSON raises LLMClientError."""
+        """Test that malformed JSON raises LLMResponseError."""
         malformed_json = '{"issues": [, "score": 0.5}'
 
-        with pytest.raises(LLMClientError) as exc_info:
+        with pytest.raises(LLMResponseError) as exc_info:
             llm_client._parse_json_response(malformed_json)
 
         assert "Invalid JSON response" in str(exc_info.value)
 
     def test_empty_string_raises_error(self, llm_client):
-        """Test that empty string raises LLMClientError."""
-        with pytest.raises(LLMClientError) as exc_info:
+        """Test that empty string raises LLMResponseError."""
+        with pytest.raises(LLMResponseError) as exc_info:
             llm_client._parse_json_response("")
 
         assert "Invalid JSON response" in str(exc_info.value)
@@ -677,10 +683,10 @@ class TestRetryLogic:
             )
 
             with patch("time.sleep"):
-                with pytest.raises(LLMClientError) as exc_info:
+                with pytest.raises(LLMRateLimitError):
                     client_with_retries._call_api("test prompt")
 
-            assert "after 4 attempts" in str(exc_info.value)  # 1 initial + 3 retries
+            # 1 initial + 3 retries = 4 total attempts
             assert mock_client.chat.completions.create.call_count == 4
 
     def test_no_retries_when_disabled(self, client_no_retries):
@@ -696,10 +702,9 @@ class TestRetryLogic:
                 body={"error": {"message": "Rate limit exceeded"}},
             )
 
-            with pytest.raises(LLMClientError) as exc_info:
+            with pytest.raises(LLMRateLimitError):
                 client_no_retries._call_api("test prompt")
 
-            assert "after 1 attempts" in str(exc_info.value)
             mock_client.chat.completions.create.assert_called_once()
 
     def test_backoff_delay_calculation(self, client_with_retries):
@@ -774,8 +779,7 @@ class TestRetryLogic:
                 with caplog.at_level(logging.WARNING):
                     client_with_retries._call_api("test prompt")
 
-            assert "Retrying" in caplog.text
-            assert "attempt 1/4" in caplog.text
+            assert "retrying" in caplog.text
 
     def test_final_failure_logs_error(self, client_with_retries, caplog):
         """Test that final failure is logged as error."""
@@ -794,7 +798,7 @@ class TestRetryLogic:
 
             with patch("time.sleep"):
                 with caplog.at_level(logging.ERROR):
-                    with pytest.raises(LLMClientError):
+                    with pytest.raises(LLMRateLimitError):
                         client_with_retries._call_api("test prompt")
 
-            assert "No more retries" in caplog.text
+            assert "no more retries" in caplog.text

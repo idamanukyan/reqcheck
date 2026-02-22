@@ -1,6 +1,5 @@
 """Testability analysis analyzer."""
 
-import logging
 import re
 
 from reqcheck.analyzers.base import BaseAnalyzer
@@ -15,10 +14,11 @@ from reqcheck.core.constants import (
     SHORT_CRITERION_THRESHOLD,
     get_severity_weights,
 )
+from reqcheck.core.exceptions import LLMClientError
+from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
-from reqcheck.llm.client import LLMClientError
 
-logger = logging.getLogger(__name__)
+logger = get_logger("analyzers.testability")
 
 
 class TestabilityAnalyzer(BaseAnalyzer):
@@ -77,7 +77,10 @@ class TestabilityAnalyzer(BaseAnalyzer):
         if self._settings.enable_rule_based_analysis:
             pattern_issues = self._run_rule_based_analysis(requirement)
             rule_issues.extend(pattern_issues)
-            logger.debug(f"Rule-based analysis found {len(rule_issues)} testability issues")
+            logger.debug(
+                "Rule-based analysis complete",
+                extra={"issue_count": len(rule_issues)},
+            )
 
         # Run LLM analysis
         if self._settings.llm_available:
@@ -88,12 +91,19 @@ class TestabilityAnalyzer(BaseAnalyzer):
 
                 # Log suggested test scenarios for reference
                 scenarios = response.get("suggested_test_scenarios", [])
-                if scenarios:
-                    logger.debug(f"Suggested test scenarios: {scenarios}")
-
-                logger.debug(f"LLM analysis found {len(llm_issues)} testability issues")
+                logger.debug(
+                    "LLM analysis complete",
+                    extra={
+                        "issue_count": len(llm_issues),
+                        "score": score,
+                        "suggested_scenarios": len(scenarios),
+                    },
+                )
             except LLMClientError as e:
-                logger.warning(f"LLM analysis failed: {e}")
+                logger.warning(
+                    "LLM analysis failed, using rule-based scoring",
+                    extra={"error": str(e)},
+                )
                 score = self._estimate_score_from_rules(rule_issues, requirement)
 
         # Merge and deduplicate

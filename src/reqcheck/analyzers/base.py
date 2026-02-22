@@ -5,7 +5,7 @@ from typing import Any
 
 from reqcheck.core.config import Settings, get_settings
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
-from reqcheck.llm.client import LLMClient, LLMClientError
+from reqcheck.llm.client import LLMClient
 from reqcheck.rules.patterns import PatternMatcher
 
 
@@ -98,7 +98,7 @@ class BaseAnalyzer(ABC):
                         evidence=issue_data.get("evidence", ""),
                     )
                 )
-            except (KeyError, ValueError) as e:
+            except (KeyError, ValueError):
                 # Skip malformed issues
                 continue
 

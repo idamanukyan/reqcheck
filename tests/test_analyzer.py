@@ -2,12 +2,9 @@
 
 import pytest
 
-from reqcheck.core.analyzer import (
-    AnalysisTimeoutError,
-    RequirementsAnalyzer,
-    analyze_requirement,
-)
+from reqcheck.core.analyzer import RequirementsAnalyzer, analyze_requirement
 from reqcheck.core.config import Settings
+from reqcheck.core.exceptions import AnalysisTimeoutError
 from reqcheck.core.models import Requirement, Severity
 
 
@@ -210,11 +207,12 @@ class TestTimeout:
         assert error.timeout_seconds == 30
         assert "30 seconds" in str(error)
 
-    def test_timeout_error_custom_message(self):
-        """Test AnalysisTimeoutError with custom message."""
-        error = AnalysisTimeoutError(60, "Custom timeout message")
+    def test_timeout_error_with_requirement_id(self):
+        """Test AnalysisTimeoutError with requirement ID."""
+        error = AnalysisTimeoutError(60, requirement_id="req-123")
         assert error.timeout_seconds == 60
-        assert error.message == "Custom timeout message"
+        assert error.requirement_id == "req-123"
+        assert "req-123" in str(error)
 
     def test_analysis_completes_within_timeout(self, settings):
         """Test that normal analysis completes within timeout."""
