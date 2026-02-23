@@ -15,6 +15,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from reqcheck.core.analyzer import AnalysisTimeoutError, RequirementsAnalyzer
+from reqcheck.core.async_analyzer import AsyncRequirementsAnalyzer, analyze_requirements_batch
 from reqcheck.core.config import Settings, get_settings
 from reqcheck.core.models import (
     AnalysisReport,
@@ -23,6 +24,7 @@ from reqcheck.core.models import (
     RequirementType,
     ScoreBreakdown,
 )
+from reqcheck.llm.cache import get_cache, reset_cache
 from reqcheck.output.formatters import format_checklist, format_markdown, format_summary
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,18 @@ class HealthResponse(BaseModel):
     llm_available: bool
 
 
+class CacheStatsResponse(BaseModel):
+    """LLM cache statistics response."""
+
+    enabled: bool
+    size: int
+    max_size: int
+    ttl_seconds: float
+    hits: int
+    misses: int
+    hit_rate: float
+
+
 class BatchRequest(BaseModel):
     """Request for batch analysis."""
 
@@ -133,6 +147,20 @@ async def lifespan(app: FastAPI):
     # Store settings and analyzer in app.state for thread-safe access
     app.state.settings = get_settings()
     app.state.analyzer = RequirementsAnalyzer(app.state.settings)
+    app.state.async_analyzer = AsyncRequirementsAnalyzer(app.state.settings)
+
+    # Configure LLM cache based on settings
+    if app.state.settings.llm_cache_enabled:
+        cache = get_cache(
+            ttl_seconds=app.state.settings.llm_cache_ttl_seconds,
+            max_size=app.state.settings.llm_cache_max_size,
+        )
+        logger.info(
+            f"LLM cache enabled: ttl={app.state.settings.llm_cache_ttl_seconds}s, "
+            f"max_size={app.state.settings.llm_cache_max_size}"
+        )
+    else:
+        logger.info("LLM cache disabled")
 
     # Configure rate limiter based on settings
     if app.state.settings.rate_limit_enabled:
@@ -148,6 +176,9 @@ async def lifespan(app: FastAPI):
 
     logger.info("reqcheck API started")
     yield
+
+    # Cleanup on shutdown
+    reset_cache()
     logger.info("reqcheck API shutting down")
 
 
@@ -202,6 +233,15 @@ def get_analyzer(request: Request) -> RequirementsAnalyzer:
     # Fallback for testing or if lifespan hasn't run
     settings = get_current_settings(request)
     return RequirementsAnalyzer(settings)
+
+
+def get_async_analyzer(request: Request) -> AsyncRequirementsAnalyzer:
+    """Dependency to get async analyzer from app.state."""
+    if hasattr(request.app.state, "async_analyzer"):
+        return request.app.state.async_analyzer
+    # Fallback for testing or if lifespan hasn't run
+    settings = get_current_settings(request)
+    return AsyncRequirementsAnalyzer(settings)
 
 
 async def verify_api_key(
@@ -291,6 +331,38 @@ async def health_check(
     )
 
 
+@app.get("/cache/stats", response_model=CacheStatsResponse)
+@limiter.limit(_get_default_limit)
+async def cache_stats(
+    request: Request,
+    settings: Settings = Depends(get_current_settings),
+):
+    """Get LLM cache statistics."""
+    if not settings.llm_cache_enabled:
+        return CacheStatsResponse(
+            enabled=False,
+            size=0,
+            max_size=0,
+            ttl_seconds=0,
+            hits=0,
+            misses=0,
+            hit_rate=0.0,
+        )
+
+    cache = get_cache()
+    stats = cache.stats()
+
+    return CacheStatsResponse(
+        enabled=True,
+        size=stats["size"],
+        max_size=stats["max_size"],
+        ttl_seconds=stats["ttl_seconds"],
+        hits=stats["hits"],
+        misses=stats["misses"],
+        hit_rate=stats["hit_rate"],
+    )
+
+
 @app.post("/analyze", response_model=AnalysisResponse)
 @limiter.limit(_get_analyze_limit)
 async def analyze_requirement(
@@ -332,54 +404,61 @@ async def analyze_batch(
     request: Request,
     body: BatchRequest,
     settings: Settings = Depends(get_current_settings),
-    analyzer: RequirementsAnalyzer = Depends(get_analyzer),
+    async_analyzer: AsyncRequirementsAnalyzer = Depends(get_async_analyzer),
     api_key: str | None = Depends(verify_api_key),
 ):
     """
-    Analyze multiple requirements in batch.
+    Analyze multiple requirements in batch with parallel processing.
 
     Limited to 10 requirements per request.
+    All requirements are analyzed concurrently for optimal performance.
     """
     # Validate each requirement in batch
     for req in body.requirements:
         validate_requirement_size(req, settings)
 
-    results = []
-    total_blockers = 0
-    ready_count = 0
+    # Convert to requirement objects
+    requirements = [req.to_requirement() for req in body.requirements]
 
-    for req in body.requirements:
-        try:
-            requirement = req.to_requirement()
-            report = analyzer.analyze(requirement)
+    try:
+        # Analyze all requirements in parallel using async
+        reports = await analyze_requirements_batch(
+            requirements,
+            settings=settings,
+            max_concurrent=min(len(requirements), 5),  # Limit concurrency
+        )
+
+        # Build response
+        results = []
+        total_blockers = 0
+        ready_count = 0
+
+        for report in reports:
             response = AnalysisResponse.from_report(report)
             results.append(response)
-
             total_blockers += response.blocker_count
             if response.is_ready_for_dev:
                 ready_count += 1
-        except AnalysisTimeoutError as e:
-            logger.error(f"Analysis timed out for '{req.title}': {e}")
-            raise HTTPException(
-                status_code=504,
-                detail=(
-                    f"Analysis timed out for '{req.title}' "
-                    f"after {e.timeout_seconds} seconds"
-                ),
-            )
-        except Exception as e:
-            logger.error(f"Analysis failed for '{req.title}': {e}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Analysis failed for '{req.title}': {str(e)}",
-            )
 
-    return BatchResponse(
-        results=results,
-        total=len(results),
-        ready_count=ready_count,
-        blocker_count=total_blockers,
-    )
+        return BatchResponse(
+            results=results,
+            total=len(results),
+            ready_count=ready_count,
+            blocker_count=total_blockers,
+        )
+
+    except AnalysisTimeoutError as e:
+        logger.error(f"Batch analysis timed out: {e}")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Analysis timed out after {e.timeout_seconds} seconds",
+        )
+    except Exception as e:
+        logger.error(f"Batch analysis failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Batch analysis failed: {str(e)}",
+        )
 
 
 @app.post("/analyze/markdown", response_class=PlainTextResponse)
@@ -489,9 +568,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Create FastAPI app with custom settings (for testing)."""
     app.state.settings = settings or get_settings()
     app.state.analyzer = RequirementsAnalyzer(app.state.settings)
+    app.state.async_analyzer = AsyncRequirementsAnalyzer(app.state.settings)
 
     # Configure rate limiter based on settings
     limiter.enabled = app.state.settings.rate_limit_enabled
+
+    # Configure cache if enabled
+    if app.state.settings.llm_cache_enabled:
+        get_cache(
+            ttl_seconds=app.state.settings.llm_cache_ttl_seconds,
+            max_size=app.state.settings.llm_cache_max_size,
+        )
 
     return app
 

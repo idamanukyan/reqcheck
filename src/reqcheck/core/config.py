@@ -56,6 +56,24 @@ class Settings(BaseSettings):
         description="Maximum delay in seconds between retries",
     )
 
+    # LLM Cache Configuration
+    llm_cache_enabled: bool = Field(
+        default=True,
+        description="Enable caching of LLM responses",
+    )
+    llm_cache_ttl_seconds: float = Field(
+        default=3600.0,
+        ge=60.0,
+        le=86400.0,
+        description="Time-to-live for cached LLM responses in seconds",
+    )
+    llm_cache_max_size: int = Field(
+        default=1000,
+        ge=10,
+        le=10000,
+        description="Maximum number of cached LLM responses",
+    )
+
     # Analysis Configuration
     enable_llm_analysis: bool = Field(
         default=True,
