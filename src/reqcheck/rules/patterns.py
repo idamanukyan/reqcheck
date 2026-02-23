@@ -2,9 +2,12 @@
 
 import re
 from dataclasses import dataclass
-from typing import Iterator
+from typing import TYPE_CHECKING, Any, Iterator
 
 from reqcheck.core.models import IssueCategory, PatternMatch, Severity
+
+if TYPE_CHECKING:
+    from reqcheck.core.config import Settings
 
 
 @dataclass
@@ -16,6 +19,7 @@ class Pattern:
     severity: Severity
     category: IssueCategory
     message_template: str
+    custom: bool = False  # Whether this is a custom user-defined pattern
 
 
 # Weasel words that indicate vague requirements
@@ -288,11 +292,158 @@ def _compile_patterns() -> list[Pattern]:
     return patterns
 
 
+def _compile_custom_patterns(
+    custom_weasel_words: list[str] | None = None,
+    custom_forbidden_terms: list[str] | None = None,
+    custom_patterns_config: dict[str, Any] | None = None,
+) -> list[Pattern]:
+    """Compile custom user-defined patterns.
+
+    Args:
+        custom_weasel_words: List of additional weasel words
+        custom_forbidden_terms: List of forbidden terms (blockers)
+        custom_patterns_config: Full custom patterns from YAML file
+
+    Returns:
+        List of compiled custom patterns
+    """
+    patterns = []
+
+    # Add custom weasel words
+    if custom_weasel_words:
+        for word in custom_weasel_words:
+            if word and word.strip():
+                # Escape special regex characters and wrap in word boundaries
+                escaped = re.escape(word.strip())
+                patterns.append(
+                    Pattern(
+                        name="custom_weasel_word",
+                        regex=re.compile(rf"\b{escaped}\b", re.IGNORECASE),
+                        severity=Severity.WARNING,
+                        category=IssueCategory.AMBIGUITY,
+                        message_template=f'Custom vague term "{{text}}" - specify measurable criteria',
+                        custom=True,
+                    )
+                )
+
+    # Add custom forbidden terms (treated as blockers)
+    if custom_forbidden_terms:
+        for term in custom_forbidden_terms:
+            if term:
+                escaped = re.escape(term)
+                patterns.append(
+                    Pattern(
+                        name="custom_forbidden_term",
+                        regex=re.compile(rf"\b{escaped}\b", re.IGNORECASE),
+                        severity=Severity.BLOCKER,
+                        category=IssueCategory.COMPLETENESS,
+                        message_template=f'Forbidden term "{{text}}" - this term is not allowed',
+                        custom=True,
+                    )
+                )
+
+    # Process custom patterns from YAML config
+    if custom_patterns_config:
+        # Custom weasel words from YAML
+        yaml_weasel = custom_patterns_config.get("weasel_words", [])
+        for word in yaml_weasel:
+            if word and word not in (custom_weasel_words or []):
+                escaped = re.escape(word)
+                patterns.append(
+                    Pattern(
+                        name="custom_weasel_word",
+                        regex=re.compile(rf"\b{escaped}\b", re.IGNORECASE),
+                        severity=Severity.WARNING,
+                        category=IssueCategory.AMBIGUITY,
+                        message_template=f'Custom vague term "{{text}}" - specify measurable criteria',
+                        custom=True,
+                    )
+                )
+
+        # Custom forbidden terms from YAML
+        yaml_forbidden = custom_patterns_config.get("forbidden_terms", [])
+        for term in yaml_forbidden:
+            if term and term not in (custom_forbidden_terms or []):
+                escaped = re.escape(term)
+                patterns.append(
+                    Pattern(
+                        name="custom_forbidden_term",
+                        regex=re.compile(rf"\b{escaped}\b", re.IGNORECASE),
+                        severity=Severity.BLOCKER,
+                        category=IssueCategory.COMPLETENESS,
+                        message_template=f'Forbidden term "{{text}}" - this term is not allowed',
+                        custom=True,
+                    )
+                )
+
+        # Custom regex patterns from YAML
+        yaml_patterns = custom_patterns_config.get("patterns", [])
+        for pattern_def in yaml_patterns:
+            if isinstance(pattern_def, dict):
+                try:
+                    regex_str = pattern_def.get("regex", "")
+                    if not regex_str:
+                        continue
+
+                    severity_str = pattern_def.get("severity", "warning").lower()
+                    severity = Severity(severity_str) if severity_str in [s.value for s in Severity] else Severity.WARNING
+
+                    category_str = pattern_def.get("category", "ambiguity").lower()
+                    category = IssueCategory(category_str) if category_str in [c.value for c in IssueCategory] else IssueCategory.AMBIGUITY
+
+                    patterns.append(
+                        Pattern(
+                            name=pattern_def.get("name", "custom_pattern"),
+                            regex=re.compile(regex_str, re.IGNORECASE),
+                            severity=severity,
+                            category=category,
+                            message_template=pattern_def.get("message", 'Pattern match "{text}"'),
+                            custom=True,
+                        )
+                    )
+                except (re.error, ValueError):
+                    # Skip invalid patterns
+                    continue
+
+    return patterns
+
+
 class PatternMatcher:
     """Rule-based pattern matcher for requirements text."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        settings: "Settings | None" = None,
+        custom_weasel_words: list[str] | None = None,
+        custom_forbidden_terms: list[str] | None = None,
+    ):
+        """Initialize pattern matcher with optional custom patterns.
+
+        Args:
+            settings: Application settings (for loading custom patterns)
+            custom_weasel_words: Additional weasel words to detect
+            custom_forbidden_terms: Forbidden terms that cause blockers
+        """
         self._patterns = _compile_patterns()
+
+        # Collect custom patterns from various sources
+        all_custom_weasel = list(custom_weasel_words or [])
+        all_custom_forbidden = list(custom_forbidden_terms or [])
+        custom_config: dict[str, Any] = {}
+
+        if settings:
+            all_custom_weasel.extend(settings.custom_weasel_words_list)
+            all_custom_forbidden.extend(settings.custom_forbidden_terms_list)
+            custom_config = settings.load_custom_patterns()
+
+        # Compile and add custom patterns
+        custom_patterns = _compile_custom_patterns(
+            custom_weasel_words=all_custom_weasel,
+            custom_forbidden_terms=all_custom_forbidden,
+            custom_patterns_config=custom_config,
+        )
+        self._patterns.extend(custom_patterns)
+        self._custom_pattern_count = len(custom_patterns)
 
     def find_matches(self, text: str) -> Iterator[PatternMatch]:
         """Find all pattern matches in the given text."""
@@ -329,3 +480,37 @@ class PatternMatcher:
         for match in self.find_matches(text):
             counts[match.severity] += 1
         return counts
+
+    @property
+    def custom_pattern_count(self) -> int:
+        """Get the number of custom patterns loaded."""
+        return self._custom_pattern_count
+
+    @property
+    def total_pattern_count(self) -> int:
+        """Get the total number of patterns."""
+        return len(self._patterns)
+
+    def get_pattern_stats(self) -> dict[str, int]:
+        """Get statistics about loaded patterns."""
+        by_category: dict[str, int] = {}
+        by_severity: dict[str, int] = {}
+        custom_count = 0
+
+        for pattern in self._patterns:
+            cat_name = pattern.category.value
+            by_category[cat_name] = by_category.get(cat_name, 0) + 1
+
+            sev_name = pattern.severity.value
+            by_severity[sev_name] = by_severity.get(sev_name, 0) + 1
+
+            if pattern.custom:
+                custom_count += 1
+
+        return {
+            "total": len(self._patterns),
+            "custom": custom_count,
+            "builtin": len(self._patterns) - custom_count,
+            "by_category": by_category,
+            "by_severity": by_severity,
+        }

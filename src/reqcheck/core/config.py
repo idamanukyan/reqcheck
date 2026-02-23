@@ -1,7 +1,8 @@
 """Configuration management for reqcheck."""
 
 from functools import lru_cache
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,6 +16,12 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+    )
+
+    # LLM Provider Selection
+    llm_provider: Literal["openai", "anthropic"] = Field(
+        default="openai",
+        description="LLM provider to use (openai or anthropic)",
     )
 
     # OpenAI Configuration
@@ -34,6 +41,25 @@ class Settings(BaseSettings):
         ge=100,
         le=16000,
         description="Maximum tokens in response",
+    )
+
+    # Anthropic Configuration
+    anthropic_api_key: str = Field(default="", description="Anthropic API key")
+    anthropic_model: str = Field(
+        default="claude-3-5-haiku-20241022",
+        description="Anthropic model to use",
+    )
+    anthropic_temperature: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Model temperature for Anthropic",
+    )
+    anthropic_max_tokens: int = Field(
+        default=2000,
+        ge=100,
+        le=16000,
+        description="Maximum tokens for Anthropic response",
     )
 
     # LLM Retry Configuration
@@ -72,6 +98,26 @@ class Settings(BaseSettings):
         ge=10,
         le=10000,
         description="Maximum number of cached LLM responses",
+    )
+
+    # Token Usage Tracking
+    track_token_usage: bool = Field(
+        default=True,
+        description="Track token usage and estimate costs",
+    )
+
+    # Custom Patterns Configuration
+    custom_patterns_file: str = Field(
+        default="",
+        description="Path to custom patterns YAML file",
+    )
+    custom_weasel_words: str = Field(
+        default="",
+        description="Comma-separated list of additional weasel words",
+    )
+    custom_forbidden_terms: str = Field(
+        default="",
+        description="Comma-separated list of forbidden terms (blockers)",
     )
 
     # Analysis Configuration
@@ -199,7 +245,56 @@ class Settings(BaseSettings):
     @property
     def llm_available(self) -> bool:
         """Check if LLM analysis is available."""
-        return bool(self.openai_api_key) and self.enable_llm_analysis
+        if not self.enable_llm_analysis:
+            return False
+        if self.llm_provider == "openai":
+            return bool(self.openai_api_key)
+        elif self.llm_provider == "anthropic":
+            return bool(self.anthropic_api_key)
+        return False
+
+    @property
+    def current_api_key(self) -> str:
+        """Get the API key for the current provider."""
+        if self.llm_provider == "openai":
+            return self.openai_api_key
+        elif self.llm_provider == "anthropic":
+            return self.anthropic_api_key
+        return ""
+
+    @property
+    def custom_weasel_words_list(self) -> list[str]:
+        """Parse custom weasel words into a list."""
+        if not self.custom_weasel_words:
+            return []
+        return [w.strip() for w in self.custom_weasel_words.split(",") if w.strip()]
+
+    @property
+    def custom_forbidden_terms_list(self) -> list[str]:
+        """Parse custom forbidden terms into a list."""
+        if not self.custom_forbidden_terms:
+            return []
+        return [t.strip() for t in self.custom_forbidden_terms.split(",") if t.strip()]
+
+    def load_custom_patterns(self) -> dict[str, Any]:
+        """Load custom patterns from YAML file if configured."""
+        if not self.custom_patterns_file:
+            return {}
+
+        path = Path(self.custom_patterns_file)
+        if not path.exists():
+            return {}
+
+        try:
+            import yaml
+
+            with open(path) as f:
+                return yaml.safe_load(f) or {}
+        except ImportError:
+            # YAML not installed
+            return {}
+        except Exception:
+            return {}
 
     @property
     def cors_origins_list(self) -> list[str]:

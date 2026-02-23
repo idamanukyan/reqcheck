@@ -24,6 +24,8 @@ from reqcheck.core.exceptions import (
 from reqcheck.core.logging import get_logger
 from reqcheck.llm.cache import LLMCache, get_cache
 from reqcheck.llm.prompts import PromptTemplates
+from reqcheck.llm.providers import TokenUsage
+from reqcheck.llm.usage import get_usage_tracker
 
 logger = get_logger("llm.async_client")
 
@@ -113,6 +115,20 @@ class AsyncLLMClient:
                 content = response.choices[0].message.content
                 if content is None:
                     raise LLMResponseError("Empty response from API")
+
+                # Track token usage if enabled
+                if self._settings.track_token_usage and response.usage:
+                    usage = TokenUsage(
+                        prompt_tokens=response.usage.prompt_tokens,
+                        completion_tokens=response.usage.completion_tokens,
+                        total_tokens=response.usage.total_tokens,
+                    )
+                    get_usage_tracker().record_usage(
+                        usage=usage,
+                        model=self._settings.openai_model,
+                        provider="openai",
+                    )
+
                 return content
 
             except OpenAIError as e:
@@ -260,3 +276,12 @@ class AsyncLLMClient:
     def cache_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
         return self._cache.stats()
+
+    def usage_stats(self) -> dict[str, Any]:
+        """Get token usage statistics."""
+        tracker = get_usage_tracker()
+        return {
+            "session": tracker.get_session_stats().to_dict(),
+            "total": tracker.get_total_stats().to_dict(),
+            "by_model": tracker.get_model_stats(),
+        }

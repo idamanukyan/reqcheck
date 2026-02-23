@@ -25,6 +25,7 @@ from reqcheck.core.models import (
     ScoreBreakdown,
 )
 from reqcheck.llm.cache import get_cache, reset_cache
+from reqcheck.llm.usage import get_usage_tracker, reset_usage_tracker
 from reqcheck.output.formatters import format_checklist, format_markdown, format_summary
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,15 @@ class CacheStatsResponse(BaseModel):
     hit_rate: float
 
 
+class UsageStatsResponse(BaseModel):
+    """LLM usage statistics response."""
+
+    tracking_enabled: bool
+    session: dict[str, Any]
+    total: dict[str, Any]
+    by_model: dict[str, Any]
+
+
 class BatchRequest(BaseModel):
     """Request for batch analysis."""
 
@@ -179,6 +189,7 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown
     reset_cache()
+    reset_usage_tracker()
     logger.info("reqcheck API shutting down")
 
 
@@ -360,6 +371,31 @@ async def cache_stats(
         hits=stats["hits"],
         misses=stats["misses"],
         hit_rate=stats["hit_rate"],
+    )
+
+
+@app.get("/usage/stats", response_model=UsageStatsResponse)
+@limiter.limit(_get_default_limit)
+async def usage_stats(
+    request: Request,
+    settings: Settings = Depends(get_current_settings),
+):
+    """Get LLM token usage and cost statistics."""
+    if not settings.track_token_usage:
+        return UsageStatsResponse(
+            tracking_enabled=False,
+            session={},
+            total={},
+            by_model={},
+        )
+
+    tracker = get_usage_tracker()
+
+    return UsageStatsResponse(
+        tracking_enabled=True,
+        session=tracker.get_session_stats().to_dict(),
+        total=tracker.get_total_stats().to_dict(),
+        by_model=tracker.get_model_stats(),
     )
 
 
