@@ -1,4 +1,60 @@
-"""Prompt templates for LLM-powered analysis."""
+"""Prompt templates for LLM-powered analysis.
+
+This module contains all prompt templates with versioning for change tracking.
+Each prompt has a version number that should be incremented when the prompt
+content changes significantly (affecting LLM behavior).
+
+Version History:
+- v1.0.0 (2024-01): Initial release
+- v1.1.0 (2024-02): Added prompt versioning support
+"""
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+
+class PromptType(Enum):
+    """Types of analysis prompts."""
+
+    SYSTEM = "system"
+    AMBIGUITY = "ambiguity"
+    COMPLETENESS = "completeness"
+    TESTABILITY = "testability"
+    RISK = "risk"
+    SUMMARY = "summary"
+
+
+@dataclass(frozen=True)
+class PromptVersion:
+    """Version information for a prompt template."""
+
+    major: int
+    minor: int
+    patch: int
+
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.patch}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "major": self.major,
+            "minor": self.minor,
+            "patch": self.patch,
+            "version_string": str(self),
+        }
+
+
+# Current versions for each prompt type
+PROMPT_VERSIONS: dict[PromptType, PromptVersion] = {
+    PromptType.SYSTEM: PromptVersion(1, 1, 0),
+    PromptType.AMBIGUITY: PromptVersion(1, 1, 0),
+    PromptType.COMPLETENESS: PromptVersion(1, 1, 0),
+    PromptType.TESTABILITY: PromptVersion(1, 1, 0),
+    PromptType.RISK: PromptVersion(1, 1, 0),
+    PromptType.SUMMARY: PromptVersion(1, 1, 0),
+}
+
 
 SYSTEM_PROMPT = """You are an expert QA architect and requirements analyst. Your task is to analyze software requirements, user stories, and tickets for quality issues that could lead to development problems, bugs, or rework.
 
@@ -152,7 +208,21 @@ Be direct and actionable. If the requirement is ready for development, say so.""
 
 
 class PromptTemplates:
-    """Container for all prompt templates."""
+    """Container for all prompt templates with versioning support.
+
+    Each prompt has an associated version that should be incremented when
+    the prompt content changes in ways that could affect LLM behavior.
+
+    Usage:
+        # Get prompt content
+        prompt = PromptTemplates.format_ambiguity(requirement_text)
+
+        # Get version info
+        version = PromptTemplates.get_version(PromptType.AMBIGUITY)
+
+        # Get all versions for logging/tracking
+        versions = PromptTemplates.get_all_versions()
+    """
 
     SYSTEM = SYSTEM_PROMPT
     AMBIGUITY = AMBIGUITY_ANALYSIS_PROMPT
@@ -160,6 +230,50 @@ class PromptTemplates:
     TESTABILITY = TESTABILITY_ANALYSIS_PROMPT
     RISK = RISK_ANALYSIS_PROMPT
     SUMMARY = SUMMARY_PROMPT
+
+    # Map prompt types to their templates
+    _TEMPLATES: dict[PromptType, str] = {
+        PromptType.SYSTEM: SYSTEM_PROMPT,
+        PromptType.AMBIGUITY: AMBIGUITY_ANALYSIS_PROMPT,
+        PromptType.COMPLETENESS: COMPLETENESS_ANALYSIS_PROMPT,
+        PromptType.TESTABILITY: TESTABILITY_ANALYSIS_PROMPT,
+        PromptType.RISK: RISK_ANALYSIS_PROMPT,
+        PromptType.SUMMARY: SUMMARY_PROMPT,
+    }
+
+    @classmethod
+    def get_version(cls, prompt_type: PromptType) -> PromptVersion:
+        """Get the version of a specific prompt type."""
+        return PROMPT_VERSIONS[prompt_type]
+
+    @classmethod
+    def get_all_versions(cls) -> dict[str, str]:
+        """Get all prompt versions as a dictionary.
+
+        Returns:
+            Dictionary mapping prompt type names to version strings.
+        """
+        return {pt.value: str(PROMPT_VERSIONS[pt]) for pt in PromptType}
+
+    @classmethod
+    def get_version_info(cls) -> dict[str, Any]:
+        """Get detailed version information for all prompts.
+
+        Returns:
+            Dictionary with prompt type names mapping to version details.
+        """
+        return {pt.value: PROMPT_VERSIONS[pt].to_dict() for pt in PromptType}
+
+    @classmethod
+    def get_prompt_hash(cls, prompt_type: PromptType) -> str:
+        """Get a hash of the prompt content for cache keying.
+
+        This can be used to invalidate caches when prompt content changes.
+        """
+        import hashlib
+
+        content = cls._TEMPLATES[prompt_type]
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
 
     @classmethod
     def format_ambiguity(cls, requirement_text: str) -> str:
@@ -193,3 +307,12 @@ class PromptTemplates:
             completeness_score=f"{completeness_score:.2f}",
             testability_score=f"{testability_score:.2f}",
         )
+
+
+def get_prompt_versions() -> dict[str, str]:
+    """Convenience function to get all prompt versions.
+
+    Returns:
+        Dictionary mapping prompt type names to version strings.
+    """
+    return PromptTemplates.get_all_versions()

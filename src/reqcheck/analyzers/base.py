@@ -4,9 +4,12 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from reqcheck.core.config import Settings, get_settings
+from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
 from reqcheck.llm.client import LLMClient
 from reqcheck.rules.patterns import PatternMatcher
+
+logger = get_logger("analyzers.base")
 
 
 class BaseAnalyzer(ABC):
@@ -81,10 +84,39 @@ class BaseAnalyzer(ABC):
     def _parse_llm_issues(
         self, llm_response: dict[str, Any], default_category: IssueCategory
     ) -> list[Issue]:
-        """Parse issues from LLM response."""
+        """Parse issues from LLM response.
+
+        Malformed issues are logged and skipped rather than causing failures.
+        """
         issues = []
-        for issue_data in llm_response.get("issues", []):
+        raw_issues = llm_response.get("issues", [])
+
+        for idx, issue_data in enumerate(raw_issues):
             try:
+                # Validate required fields
+                if not isinstance(issue_data, dict):
+                    logger.debug(
+                        "Skipping non-dict issue from LLM response",
+                        extra={
+                            "index": idx,
+                            "category": default_category.value,
+                            "issue_type": type(issue_data).__name__,
+                        },
+                    )
+                    continue
+
+                message = issue_data.get("message", "")
+                if not message:
+                    logger.debug(
+                        "Skipping issue with empty message",
+                        extra={
+                            "index": idx,
+                            "category": default_category.value,
+                            "issue_data": str(issue_data)[:100],
+                        },
+                    )
+                    continue
+
                 severity_str = issue_data.get("severity", "warning").lower()
                 severity = Severity(severity_str) if severity_str in [s.value for s in Severity] else Severity.WARNING
 
@@ -93,14 +125,34 @@ class BaseAnalyzer(ABC):
                         severity=severity,
                         category=default_category,
                         location=issue_data.get("location", "unknown"),
-                        message=issue_data.get("message", ""),
+                        message=message,
                         suggestion=issue_data.get("suggestion", ""),
                         evidence=issue_data.get("evidence", ""),
                     )
                 )
-            except (KeyError, ValueError):
-                # Skip malformed issues
+            except (KeyError, ValueError, TypeError) as e:
+                logger.debug(
+                    "Skipping malformed issue from LLM response",
+                    extra={
+                        "index": idx,
+                        "category": default_category.value,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "issue_data": str(issue_data)[:200] if issue_data else "(empty)",
+                    },
+                )
                 continue
+
+        if len(issues) < len(raw_issues):
+            logger.debug(
+                "Some LLM issues were dropped during parsing",
+                extra={
+                    "parsed_count": len(issues),
+                    "raw_count": len(raw_issues),
+                    "dropped_count": len(raw_issues) - len(issues),
+                    "category": default_category.value,
+                },
+            )
 
         return issues
 

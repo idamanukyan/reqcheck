@@ -1,6 +1,7 @@
 """Async main analyzer orchestrator with parallel execution."""
 
 import asyncio
+from dataclasses import dataclass
 from typing import Any
 
 from reqcheck.analyzers.async_analyzers import (
@@ -262,36 +263,131 @@ async def analyze_requirement_async(
     return await analyzer.analyze(requirement)
 
 
+@dataclass
+class BatchAnalysisResult:
+    """Result of a single requirement analysis in a batch.
+
+    Contains either a successful report or error information.
+    """
+
+    index: int
+    requirement_id: str
+    requirement_title: str
+    success: bool
+    report: AnalysisReport | None = None
+    error: str | None = None
+    error_type: str | None = None
+
+
+@dataclass
+class BatchAnalysisResponse:
+    """Response from batch analysis with partial results support.
+
+    Includes all results (successful and failed) with per-item error details.
+    """
+
+    results: list[BatchAnalysisResult]
+    total: int
+    successful: int
+    failed: int
+
+    @property
+    def reports(self) -> list[AnalysisReport]:
+        """Get only successful reports."""
+        return [r.report for r in self.results if r.success and r.report]
+
+    @property
+    def errors(self) -> list[BatchAnalysisResult]:
+        """Get only failed results."""
+        return [r for r in self.results if not r.success]
+
+
 async def analyze_requirements_batch(
     requirements: list[Requirement | dict[str, Any]],
     settings: Settings | None = None,
     max_concurrent: int = 5,
-) -> list[AnalysisReport]:
+    return_partial: bool = True,
+) -> list[AnalysisReport] | BatchAnalysisResponse:
     """
-    Analyze multiple requirements in parallel.
+    Analyze multiple requirements in parallel with partial results support.
 
     Args:
         requirements: List of requirements to analyze
         settings: Optional settings override
         max_concurrent: Maximum number of concurrent analyses
+        return_partial: If True, returns BatchAnalysisResponse with per-item errors.
+                       If False, returns list of reports (legacy behavior, raises on error).
 
     Returns:
-        List of analysis reports in the same order as input
+        If return_partial=True: BatchAnalysisResponse with all results and error details
+        If return_partial=False: List of analysis reports (raises exception on any error)
     """
     analyzer = AsyncRequirementsAnalyzer(settings)
 
     # Convert dicts to Requirement objects
-    reqs = [
-        Requirement(**r) if isinstance(r, dict) else r
-        for r in requirements
-    ]
+    reqs: list[Requirement] = []
+    for r in requirements:
+        if isinstance(r, dict):
+            reqs.append(Requirement(**r))
+        else:
+            reqs.append(r)
 
     # Use semaphore to limit concurrency
     semaphore = asyncio.Semaphore(max_concurrent)
 
-    async def analyze_with_limit(req: Requirement) -> AnalysisReport:
+    async def analyze_with_limit(idx: int, req: Requirement) -> BatchAnalysisResult:
+        """Analyze a single requirement with error handling."""
         async with semaphore:
-            return await analyzer.analyze(req)
+            try:
+                report = await analyzer.analyze(req)
+                return BatchAnalysisResult(
+                    index=idx,
+                    requirement_id=req.id,
+                    requirement_title=req.title,
+                    success=True,
+                    report=report,
+                )
+            except Exception as e:
+                logger.error(
+                    "Batch item analysis failed",
+                    extra={
+                        "index": idx,
+                        "requirement_id": req.id,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    },
+                )
+                return BatchAnalysisResult(
+                    index=idx,
+                    requirement_id=req.id,
+                    requirement_title=req.title,
+                    success=False,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
 
     # Run all analyses in parallel with concurrency limit
-    return await asyncio.gather(*[analyze_with_limit(req) for req in reqs])
+    results = await asyncio.gather(*[
+        analyze_with_limit(idx, req)
+        for idx, req in enumerate(reqs)
+    ])
+
+    if return_partial:
+        successful = sum(1 for r in results if r.success)
+        return BatchAnalysisResponse(
+            results=list(results),
+            total=len(results),
+            successful=successful,
+            failed=len(results) - successful,
+        )
+    else:
+        # Legacy behavior: return only reports, but check for errors first
+        errors = [r for r in results if not r.success]
+        if errors:
+            error_msg = f"{len(errors)} of {len(results)} requirements failed to analyze"
+            raise AnalysisError(error_msg)
+
+        return [r.report for r in results if r.report]
+
+
+from reqcheck.core.exceptions import AnalysisError

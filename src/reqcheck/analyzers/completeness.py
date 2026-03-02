@@ -5,16 +5,13 @@ from reqcheck.core.constants import (
     MIN_ACCEPTANCE_CRITERIA_COUNT,
     MIN_ACCEPTANCE_CRITERION_LENGTH,
     MIN_DESCRIPTION_LENGTH,
-    PENALTY_MISSING_ACCEPTANCE_CRITERIA,
-    PENALTY_SHORT_DESCRIPTION,
     SCORE_DEFAULT_LLM_FALLBACK,
     SCORE_PERFECT,
-    SEVERITY_WEIGHT_DEFAULT,
-    get_completeness_severity_weights,
 )
 from reqcheck.core.exceptions import LLMClientError
 from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
+from reqcheck.core.scoring import calculate_completeness_score
 
 logger = get_logger("analyzers.completeness")
 
@@ -154,19 +151,4 @@ class CompletenessAnalyzer(BaseAnalyzer):
         self, issues: list[Issue], requirement: Requirement
     ) -> float:
         """Estimate completeness score based on structural checks and rules."""
-        base_score = SCORE_PERFECT
-
-        # Major penalty for missing acceptance criteria
-        if not requirement.acceptance_criteria:
-            base_score -= PENALTY_MISSING_ACCEPTANCE_CRITERIA
-
-        # Penalty for short description
-        if len(requirement.description) < MIN_DESCRIPTION_LENGTH:
-            base_score -= PENALTY_SHORT_DESCRIPTION
-
-        # Additional penalties from issues
-        weights = get_completeness_severity_weights()
-        for issue in issues:
-            base_score -= weights.get(issue.severity.value, SEVERITY_WEIGHT_DEFAULT)
-
-        return max(0.0, min(1.0, base_score))
+        return calculate_completeness_score(issues, requirement)

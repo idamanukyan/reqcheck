@@ -1,18 +1,11 @@
 """Ambiguity detection analyzer."""
 
 from reqcheck.analyzers.base import BaseAnalyzer
-from reqcheck.core.constants import (
-    PENALTY_REDUCTION_FACTOR_LONG_TEXT,
-    SCORE_BASELINE_NO_LLM,
-    SCORE_DEFAULT_LLM_FALLBACK,
-    SCORE_PERFECT,
-    SEVERITY_WEIGHT_DEFAULT,
-    TEXT_LENGTH_LONG_THRESHOLD,
-    get_severity_weights,
-)
+from reqcheck.core.constants import SCORE_DEFAULT_LLM_FALLBACK, SCORE_PERFECT
 from reqcheck.core.exceptions import LLMClientError
 from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement
+from reqcheck.core.scoring import calculate_ambiguity_score
 
 logger = get_logger("analyzers.ambiguity")
 
@@ -76,16 +69,4 @@ class AmbiguityAnalyzer(BaseAnalyzer):
         self, issues: list[Issue], requirement: Requirement
     ) -> float:
         """Estimate ambiguity score based on rule matches."""
-        if not issues:
-            return SCORE_BASELINE_NO_LLM
-
-        # Weight by severity
-        weights = get_severity_weights()
-        penalty = sum(weights.get(i.severity.value, SEVERITY_WEIGHT_DEFAULT) for i in issues)
-
-        # Normalize by text length (more text = more potential matches)
-        text_len = len(requirement.full_text)
-        if text_len > TEXT_LENGTH_LONG_THRESHOLD:
-            penalty *= PENALTY_REDUCTION_FACTOR_LONG_TEXT
-
-        return max(0.0, min(1.0, SCORE_PERFECT - penalty))
+        return calculate_ambiguity_score(issues, requirement)

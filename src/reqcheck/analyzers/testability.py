@@ -4,19 +4,15 @@ import re
 
 from reqcheck.analyzers.base import BaseAnalyzer
 from reqcheck.core.constants import (
-    BONUS_TESTABLE_PATTERNS,
     RESTATEMENT_OVERLAP_THRESHOLD,
-    SCORE_BASELINE_TESTABILITY,
     SCORE_DEFAULT_LLM_FALLBACK,
-    SCORE_NO_ACCEPTANCE_CRITERIA,
     SCORE_PERFECT,
-    SEVERITY_WEIGHT_DEFAULT,
     SHORT_CRITERION_THRESHOLD,
-    get_severity_weights,
 )
 from reqcheck.core.exceptions import LLMClientError
 from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
+from reqcheck.core.scoring import calculate_testability_score
 
 logger = get_logger("analyzers.testability")
 
@@ -189,27 +185,13 @@ class TestabilityAnalyzer(BaseAnalyzer):
         self, issues: list[Issue], requirement: Requirement
     ) -> float:
         """Estimate testability score based on patterns and issues."""
-        if not requirement.acceptance_criteria:
-            return SCORE_NO_ACCEPTANCE_CRITERIA
-
-        base_score = SCORE_BASELINE_TESTABILITY
-
-        # Bonus for testable patterns in AC
-        testable_count = 0
-        for ac in requirement.acceptance_criteria:
-            if any(
-                re.search(pattern, ac, re.IGNORECASE)
-                for pattern in self.TESTABLE_PATTERNS
-            ):
-                testable_count += 1
-
+        # Calculate testable pattern ratio
+        testable_ratio = 0.0
         if requirement.acceptance_criteria:
+            testable_count = sum(
+                1 for ac in requirement.acceptance_criteria
+                if any(re.search(pattern, ac, re.IGNORECASE) for pattern in self.TESTABLE_PATTERNS)
+            )
             testable_ratio = testable_count / len(requirement.acceptance_criteria)
-            base_score += testable_ratio * BONUS_TESTABLE_PATTERNS
 
-        # Penalties from issues
-        weights = get_severity_weights()
-        for issue in issues:
-            base_score -= weights.get(issue.severity.value, SEVERITY_WEIGHT_DEFAULT)
-
-        return max(0.0, min(1.0, base_score))
+        return calculate_testability_score(issues, requirement, testable_ratio)

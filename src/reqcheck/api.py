@@ -17,7 +17,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from reqcheck.core.analyzer import AnalysisTimeoutError, RequirementsAnalyzer
-from reqcheck.core.async_analyzer import AsyncRequirementsAnalyzer, analyze_requirements_batch
+from reqcheck.core.async_analyzer import (
+    AsyncRequirementsAnalyzer,
+    BatchAnalysisResponse,
+    analyze_requirements_batch,
+)
 from reqcheck.core.config import Settings, get_settings
 from reqcheck.core.models import (
     AnalysisReport,
@@ -29,6 +33,7 @@ from reqcheck.core.models import (
 from reqcheck.core.observability import MetricNames, get_metrics, reset_metrics
 from reqcheck.llm.cache import get_cache, reset_cache
 from reqcheck.llm.circuit_breaker import get_circuit_breaker, reset_circuit_breaker
+from reqcheck.llm.prompts import PromptTemplates
 from reqcheck.llm.usage import get_usage_tracker, reset_usage_tracker
 from reqcheck.output.formatters import format_checklist, format_markdown, format_summary
 
@@ -208,6 +213,13 @@ class MetricsResponse(BaseModel):
     timings: dict[str, Any]
 
 
+class PromptVersionsResponse(BaseModel):
+    """Prompt versions response for debugging and auditing."""
+
+    versions: dict[str, str]
+    hashes: dict[str, str]
+
+
 class BatchRequest(BaseModel):
     """Request for batch analysis."""
 
@@ -219,11 +231,25 @@ class BatchRequest(BaseModel):
     )
 
 
-class BatchResponse(BaseModel):
-    """Response for batch analysis."""
+class BatchItemResult(BaseModel):
+    """Individual result from batch analysis with error handling."""
 
-    results: list[AnalysisResponse]
+    index: int
+    requirement_id: str
+    requirement_title: str
+    success: bool
+    report: AnalysisResponse | None = None
+    error: str | None = None
+    error_type: str | None = None
+
+
+class BatchResponse(BaseModel):
+    """Response for batch analysis with partial results support."""
+
+    results: list[BatchItemResult]
     total: int
+    successful: int
+    failed: int
     ready_count: int
     blocker_count: int
 
@@ -557,6 +583,25 @@ async def metrics_stats(
     )
 
 
+@app.get("/prompts/versions", response_model=PromptVersionsResponse)
+@limiter.limit(_get_default_limit)
+async def prompt_versions(request: Request):
+    """Get prompt template versions for debugging and auditing.
+
+    Returns version strings and content hashes for all prompt templates.
+    Useful for tracking which prompt versions were used in analysis results.
+    """
+    from reqcheck.llm.prompts import PromptType
+
+    return PromptVersionsResponse(
+        versions=PromptTemplates.get_all_versions(),
+        hashes={
+            pt.value: PromptTemplates.get_prompt_hash(pt)
+            for pt in PromptType
+        },
+    )
+
+
 @app.post("/analyze", response_model=AnalysisResponse)
 @limiter.limit(_get_analyze_limit)
 async def analyze_requirement(
@@ -623,6 +668,9 @@ async def analyze_batch(
 
     Limited to 10 requirements per request.
     All requirements are analyzed concurrently for optimal performance.
+
+    Returns partial results - if some requirements fail to analyze,
+    successful results are still returned along with per-item error details.
     """
     metrics = get_metrics()
     metrics.increment(MetricNames.API_REQUESTS, tags={"endpoint": "/analyze/batch"})
@@ -634,55 +682,73 @@ async def analyze_batch(
     # Convert to requirement objects
     requirements = [req.to_requirement() for req in body.requirements]
 
-    try:
-        with metrics.timer(MetricNames.ANALYSIS_DURATION, tags={"endpoint": "/analyze/batch"}):
-            # Analyze all requirements in parallel using async
-            reports = await analyze_requirements_batch(
-                requirements,
-                settings=settings,
-                max_concurrent=min(len(requirements), 5),  # Limit concurrency
+    with metrics.timer(MetricNames.ANALYSIS_DURATION, tags={"endpoint": "/analyze/batch"}):
+        # Analyze all requirements in parallel with partial results support
+        batch_response: BatchAnalysisResponse = await analyze_requirements_batch(
+            requirements,
+            settings=settings,
+            max_concurrent=min(len(requirements), 5),  # Limit concurrency
+            return_partial=True,  # Enable partial results
+        )
+
+    # Build response with per-item results
+    results: list[BatchItemResult] = []
+    total_blockers = 0
+    ready_count = 0
+    total_issues = 0
+
+    for batch_result in batch_response.results:
+        if batch_result.success and batch_result.report:
+            report = batch_result.report
+            analysis_response = AnalysisResponse.from_report(report)
+            results.append(
+                BatchItemResult(
+                    index=batch_result.index,
+                    requirement_id=batch_result.requirement_id,
+                    requirement_title=batch_result.requirement_title,
+                    success=True,
+                    report=analysis_response,
+                )
+            )
+            total_blockers += analysis_response.blocker_count
+            total_issues += len(report.issues)
+            if analysis_response.is_ready_for_dev:
+                ready_count += 1
+        else:
+            # Include failed items with error details
+            results.append(
+                BatchItemResult(
+                    index=batch_result.index,
+                    requirement_id=batch_result.requirement_id,
+                    requirement_title=batch_result.requirement_title,
+                    success=False,
+                    error=batch_result.error,
+                    error_type=batch_result.error_type,
+                )
+            )
+            metrics.increment(
+                MetricNames.ANALYSIS_ERRORS,
+                tags={"type": batch_result.error_type or "unknown"},
             )
 
-        # Build response
-        results = []
-        total_blockers = 0
-        ready_count = 0
-        total_issues = 0
+    # Record metrics
+    metrics.increment(MetricNames.ANALYSIS_TOTAL, value=batch_response.successful)
+    metrics.increment(MetricNames.ANALYSIS_ISSUES_FOUND, value=total_issues)
 
-        for report in reports:
-            response = AnalysisResponse.from_report(report)
-            results.append(response)
-            total_blockers += response.blocker_count
-            total_issues += len(report.issues)
-            if response.is_ready_for_dev:
-                ready_count += 1
-
-        # Record metrics
-        metrics.increment(MetricNames.ANALYSIS_TOTAL, value=len(reports))
-        metrics.increment(MetricNames.ANALYSIS_ISSUES_FOUND, value=total_issues)
-
-        return BatchResponse(
-            results=results,
-            total=len(results),
-            ready_count=ready_count,
-            blocker_count=total_blockers,
+    if batch_response.failed > 0:
+        logger.warning(
+            f"Batch analysis completed with partial failures: "
+            f"{batch_response.failed}/{batch_response.total} failed"
         )
 
-    except AnalysisTimeoutError as e:
-        metrics.increment(MetricNames.ANALYSIS_ERRORS, tags={"type": "timeout"})
-        logger.error(f"Batch analysis timed out: {e}")
-        raise HTTPException(
-            status_code=504,
-            detail=f"Analysis timed out after {e.timeout_seconds} seconds",
-        )
-    except Exception as e:
-        metrics.increment(MetricNames.ANALYSIS_ERRORS, tags={"type": "error"})
-        metrics.increment(MetricNames.API_ERRORS, tags={"endpoint": "/analyze/batch"})
-        logger.error(f"Batch analysis failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Batch analysis failed: {str(e)}",
-        )
+    return BatchResponse(
+        results=results,
+        total=batch_response.total,
+        successful=batch_response.successful,
+        failed=batch_response.failed,
+        ready_count=ready_count,
+        blocker_count=total_blockers,
+    )
 
 
 @app.post("/analyze/markdown", response_class=PlainTextResponse)

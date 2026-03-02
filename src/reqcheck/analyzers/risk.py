@@ -3,17 +3,11 @@
 import re
 
 from reqcheck.analyzers.base import BaseAnalyzer
-from reqcheck.core.constants import (
-    MAX_EVIDENCE_MATCHES,
-    PENALTY_MULTIPLE_RISK_FACTORS,
-    RISK_FACTORS_HIGH_THRESHOLD,
-    SCORE_PERFECT,
-    SEVERITY_WEIGHT_DEFAULT,
-    get_risk_severity_weights,
-)
+from reqcheck.core.constants import MAX_EVIDENCE_MATCHES
 from reqcheck.core.exceptions import LLMClientError
 from reqcheck.core.logging import get_logger
 from reqcheck.core.models import Issue, IssueCategory, Requirement, Severity
+from reqcheck.core.scoring import calculate_risk_score
 
 logger = get_logger("analyzers.risk")
 
@@ -243,15 +237,4 @@ class RiskAnalyzer(BaseAnalyzer):
 
         This is inverted from typical risk scoring for consistency with other analyzers.
         """
-        base_score = SCORE_PERFECT
-
-        # Penalty based on issue severity
-        weights = get_risk_severity_weights()
-        for issue in issues:
-            base_score -= weights.get(issue.severity.value, SEVERITY_WEIGHT_DEFAULT)
-
-        # Additional penalty for multiple risk factors
-        if len(risk_factors) > RISK_FACTORS_HIGH_THRESHOLD:
-            base_score -= PENALTY_MULTIPLE_RISK_FACTORS
-
-        return max(0.0, min(1.0, base_score))
+        return calculate_risk_score(issues, risk_factors)

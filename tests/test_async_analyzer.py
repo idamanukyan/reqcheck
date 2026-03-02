@@ -269,7 +269,9 @@ class TestAnalyzeRequirementsBatch:
             for i in range(3)
         ]
 
-        reports = await analyze_requirements_batch(requirements, settings=settings)
+        reports = await analyze_requirements_batch(
+            requirements, settings=settings, return_partial=False
+        )
 
         assert len(reports) == 3
         for i, report in enumerate(reports):
@@ -293,7 +295,9 @@ class TestAnalyzeRequirementsBatch:
             for title in titles
         ]
 
-        reports = await analyze_requirements_batch(requirements, settings=settings)
+        reports = await analyze_requirements_batch(
+            requirements, settings=settings, return_partial=False
+        )
 
         assert [r.requirement_title for r in reports] == titles
 
@@ -313,7 +317,9 @@ class TestAnalyzeRequirementsBatch:
             }
         ]
 
-        reports = await analyze_requirements_batch(requirements, settings=settings)
+        reports = await analyze_requirements_batch(
+            requirements, settings=settings, return_partial=False
+        )
 
         assert len(reports) == 1
         assert reports[0].requirement_title == "Dict Requirement"
@@ -337,10 +343,40 @@ class TestAnalyzeRequirementsBatch:
 
         # Should complete without issues even with max_concurrent=2
         reports = await analyze_requirements_batch(
-            requirements, settings=settings, max_concurrent=2
+            requirements, settings=settings, max_concurrent=2, return_partial=False
         )
 
         assert len(reports) == 10
+
+    @pytest.mark.asyncio
+    async def test_batch_analyze_returns_batch_response(self):
+        """Test batch analysis returns BatchAnalysisResponse with return_partial=True."""
+        from reqcheck.core.async_analyzer import BatchAnalysisResponse
+
+        settings = Settings(
+            openai_api_key="",
+            enable_llm_analysis=False,
+        )
+
+        requirements = [
+            Requirement(
+                title=f"Feature {i}",
+                description=f"Description for feature {i}",
+                acceptance_criteria=[f"Criterion for feature {i}"],
+            )
+            for i in range(3)
+        ]
+
+        response = await analyze_requirements_batch(
+            requirements, settings=settings, return_partial=True
+        )
+
+        assert isinstance(response, BatchAnalysisResponse)
+        assert response.total == 3
+        assert response.successful == 3
+        assert response.failed == 0
+        assert len(response.reports) == 3
+        assert all(r.success for r in response.results)
 
 
 class TestCacheIntegration:

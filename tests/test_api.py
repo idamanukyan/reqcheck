@@ -124,7 +124,18 @@ class TestBatchEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 2
+        assert data["successful"] == 2
+        assert data["failed"] == 0
         assert len(data["results"]) == 2
+        # Verify each result has the expected structure
+        for result in data["results"]:
+            assert "index" in result
+            assert "requirement_id" in result
+            assert "requirement_title" in result
+            assert "success" in result
+            assert result["success"] is True
+            assert "report" in result
+            assert result["report"] is not None
 
     def test_batch_empty_list(self, client):
         response = client.post(
