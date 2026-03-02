@@ -7,12 +7,14 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from reqcheck.core.analyzer import AnalysisTimeoutError, RequirementsAnalyzer
 from reqcheck.core.async_analyzer import AsyncRequirementsAnalyzer, analyze_requirements_batch
@@ -24,11 +26,72 @@ from reqcheck.core.models import (
     RequirementType,
     ScoreBreakdown,
 )
+from reqcheck.core.observability import MetricNames, get_metrics, reset_metrics
 from reqcheck.llm.cache import get_cache, reset_cache
+from reqcheck.llm.circuit_breaker import get_circuit_breaker, reset_circuit_breaker
 from reqcheck.llm.usage import get_usage_tracker, reset_usage_tracker
 from reqcheck.output.formatters import format_checklist, format_markdown, format_summary
 
 logger = logging.getLogger(__name__)
+
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    """Middleware to limit request body size before parsing.
+
+    This prevents resource exhaustion from oversized payloads by rejecting
+    requests that exceed the configured size limit before they are fully parsed.
+    """
+
+    def __init__(self, app: ASGIApp, max_body_bytes: int = 1048576):
+        super().__init__(app)
+        self.max_body_bytes = max_body_bytes
+
+    async def dispatch(self, request: Request, call_next):
+        # Check Content-Length header if present
+        content_length = request.headers.get("content-length")
+        if content_length is not None:
+            try:
+                length = int(content_length)
+                if length > self.max_body_bytes:
+                    logger.warning(
+                        "Request body too large (from Content-Length)",
+                        extra={
+                            "content_length": length,
+                            "max_bytes": self.max_body_bytes,
+                            "path": request.url.path,
+                        },
+                    )
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "detail": f"Request body too large. Maximum size is {self.max_body_bytes} bytes."
+                        },
+                    )
+            except ValueError:
+                pass  # Invalid content-length header, let other validation handle it
+
+        # For requests without Content-Length (chunked encoding), we need to
+        # read the body and check its size. This is done by wrapping the body.
+        if request.method in ("POST", "PUT", "PATCH"):
+            body = await request.body()
+            if len(body) > self.max_body_bytes:
+                logger.warning(
+                    "Request body too large (from body read)",
+                    extra={
+                        "body_size": len(body),
+                        "max_bytes": self.max_body_bytes,
+                        "path": request.url.path,
+                    },
+                )
+                return JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": f"Request body too large. Maximum size is {self.max_body_bytes} bytes."
+                    },
+                )
+
+        response = await call_next(request)
+        return response
 
 
 # Request/Response models
@@ -121,6 +184,30 @@ class UsageStatsResponse(BaseModel):
     by_model: dict[str, Any]
 
 
+class CircuitBreakerStatsResponse(BaseModel):
+    """Circuit breaker statistics response."""
+
+    enabled: bool
+    state: str
+    consecutive_failures: int
+    consecutive_successes: int
+    total_failures: int
+    total_successes: int
+    total_rejected: int
+    failures_in_window: int
+
+
+class MetricsResponse(BaseModel):
+    """Metrics statistics response."""
+
+    enabled: bool
+    uptime_seconds: float
+    counters: dict[str, float]
+    counter_breakdown: dict[str, Any]
+    gauges: dict[str, float]
+    timings: dict[str, Any]
+
+
 class BatchRequest(BaseModel):
     """Request for batch analysis."""
 
@@ -190,6 +277,8 @@ async def lifespan(app: FastAPI):
     # Cleanup on shutdown
     reset_cache()
     reset_usage_tracker()
+    reset_circuit_breaker()
+    reset_metrics()
     logger.info("reqcheck API shutting down")
 
 
@@ -212,6 +301,12 @@ app.add_middleware(
     allow_credentials=_startup_settings.cors_allow_credentials,
     allow_methods=_startup_settings.cors_methods_list,
     allow_headers=_startup_settings.cors_headers_list,
+)
+
+# Add request size limit middleware
+app.add_middleware(
+    RequestSizeLimitMiddleware,
+    max_body_bytes=_startup_settings.max_request_body_bytes,
 )
 
 
@@ -399,6 +494,69 @@ async def usage_stats(
     )
 
 
+@app.get("/circuit-breaker/stats", response_model=CircuitBreakerStatsResponse)
+@limiter.limit(_get_default_limit)
+async def circuit_breaker_stats(
+    request: Request,
+    settings: Settings = Depends(get_current_settings),
+):
+    """Get circuit breaker statistics for LLM API calls."""
+    if not settings.circuit_breaker_enabled:
+        return CircuitBreakerStatsResponse(
+            enabled=False,
+            state="disabled",
+            consecutive_failures=0,
+            consecutive_successes=0,
+            total_failures=0,
+            total_successes=0,
+            total_rejected=0,
+            failures_in_window=0,
+        )
+
+    breaker = get_circuit_breaker()
+    stats = breaker.stats
+
+    return CircuitBreakerStatsResponse(
+        enabled=True,
+        state=stats.state.value,
+        consecutive_failures=stats.consecutive_failures,
+        consecutive_successes=stats.consecutive_successes,
+        total_failures=stats.total_failures,
+        total_successes=stats.total_successes,
+        total_rejected=stats.total_rejected,
+        failures_in_window=len(stats.failure_timestamps),
+    )
+
+
+@app.get("/metrics", response_model=MetricsResponse)
+@limiter.limit(_get_default_limit)
+async def metrics_stats(
+    request: Request,
+    settings: Settings = Depends(get_current_settings),
+):
+    """Get application metrics and statistics."""
+    if not settings.metrics_enabled:
+        return MetricsResponse(
+            enabled=False,
+            uptime_seconds=0.0,
+            counters={},
+            counter_breakdown={},
+            gauges={},
+            timings={},
+        )
+
+    stats = get_metrics().get_stats()
+
+    return MetricsResponse(
+        enabled=True,
+        uptime_seconds=stats.get("uptime_seconds", 0.0),
+        counters=stats.get("counters", {}),
+        counter_breakdown=stats.get("counter_breakdown", {}),
+        gauges=stats.get("gauges", {}),
+        timings=stats.get("timings", {}),
+    )
+
+
 @app.post("/analyze", response_model=AnalysisResponse)
 @limiter.limit(_get_analyze_limit)
 async def analyze_requirement(
@@ -416,20 +574,37 @@ async def analyze_requirement(
     - Scores for ambiguity, completeness, and testability
     - Executive summary and recommendations
     """
+    metrics = get_metrics()
+    metrics.increment(MetricNames.API_REQUESTS, tags={"endpoint": "/analyze"})
+
     # Validate request size
     validate_requirement_size(body, settings)
 
     try:
         requirement = body.to_requirement()
-        report = analyzer.analyze(requirement)
+
+        with metrics.timer(MetricNames.ANALYSIS_DURATION, tags={"endpoint": "/analyze"}):
+            report = analyzer.analyze(requirement)
+
+        # Record analysis metrics
+        metrics.increment(MetricNames.ANALYSIS_TOTAL)
+        metrics.increment(
+            MetricNames.ANALYSIS_ISSUES_FOUND,
+            value=len(report.issues),
+            tags={"severity": "all"},
+        )
+
         return AnalysisResponse.from_report(report)
     except AnalysisTimeoutError as e:
+        metrics.increment(MetricNames.ANALYSIS_ERRORS, tags={"type": "timeout"})
         logger.error(f"Analysis timed out: {e}")
         raise HTTPException(
             status_code=504,
             detail=f"Analysis timed out after {e.timeout_seconds} seconds",
         )
     except Exception as e:
+        metrics.increment(MetricNames.ANALYSIS_ERRORS, tags={"type": "error"})
+        metrics.increment(MetricNames.API_ERRORS, tags={"endpoint": "/analyze"})
         logger.error(f"Analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
@@ -449,6 +624,9 @@ async def analyze_batch(
     Limited to 10 requirements per request.
     All requirements are analyzed concurrently for optimal performance.
     """
+    metrics = get_metrics()
+    metrics.increment(MetricNames.API_REQUESTS, tags={"endpoint": "/analyze/batch"})
+
     # Validate each requirement in batch
     for req in body.requirements:
         validate_requirement_size(req, settings)
@@ -457,24 +635,31 @@ async def analyze_batch(
     requirements = [req.to_requirement() for req in body.requirements]
 
     try:
-        # Analyze all requirements in parallel using async
-        reports = await analyze_requirements_batch(
-            requirements,
-            settings=settings,
-            max_concurrent=min(len(requirements), 5),  # Limit concurrency
-        )
+        with metrics.timer(MetricNames.ANALYSIS_DURATION, tags={"endpoint": "/analyze/batch"}):
+            # Analyze all requirements in parallel using async
+            reports = await analyze_requirements_batch(
+                requirements,
+                settings=settings,
+                max_concurrent=min(len(requirements), 5),  # Limit concurrency
+            )
 
         # Build response
         results = []
         total_blockers = 0
         ready_count = 0
+        total_issues = 0
 
         for report in reports:
             response = AnalysisResponse.from_report(report)
             results.append(response)
             total_blockers += response.blocker_count
+            total_issues += len(report.issues)
             if response.is_ready_for_dev:
                 ready_count += 1
+
+        # Record metrics
+        metrics.increment(MetricNames.ANALYSIS_TOTAL, value=len(reports))
+        metrics.increment(MetricNames.ANALYSIS_ISSUES_FOUND, value=total_issues)
 
         return BatchResponse(
             results=results,
@@ -484,12 +669,15 @@ async def analyze_batch(
         )
 
     except AnalysisTimeoutError as e:
+        metrics.increment(MetricNames.ANALYSIS_ERRORS, tags={"type": "timeout"})
         logger.error(f"Batch analysis timed out: {e}")
         raise HTTPException(
             status_code=504,
             detail=f"Analysis timed out after {e.timeout_seconds} seconds",
         )
     except Exception as e:
+        metrics.increment(MetricNames.ANALYSIS_ERRORS, tags={"type": "error"})
+        metrics.increment(MetricNames.API_ERRORS, tags={"endpoint": "/analyze/batch"})
         logger.error(f"Batch analysis failed: {e}")
         raise HTTPException(
             status_code=500,

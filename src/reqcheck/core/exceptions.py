@@ -131,6 +131,15 @@ class LLMRateLimitError(LLMError):
         super().__init__(message, details)
 
 
+class LLMCircuitBreakerError(LLMError):
+    """Raised when circuit breaker is open and rejecting LLM requests."""
+
+    def __init__(self, retry_after: float):
+        self.retry_after = retry_after
+        message = f"LLM service unavailable (circuit breaker open), retry after {retry_after:.1f}s"
+        super().__init__(message, {"retry_after": retry_after, "circuit_breaker_open": True})
+
+
 # =============================================================================
 # Validation Errors
 # =============================================================================

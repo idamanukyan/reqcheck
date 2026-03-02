@@ -16,23 +16,43 @@ from openai import (
 
 from reqcheck.core.config import Settings, get_settings
 from reqcheck.core.exceptions import (
+    LLMCircuitBreakerError,
     LLMClientError,
     LLMConfigurationError,
     LLMRateLimitError,
     LLMResponseError,
 )
 from reqcheck.core.logging import get_logger
+from reqcheck.core.observability import MetricNames, get_metrics
+from reqcheck.llm.circuit_breaker import (
+    CircuitBreakerConfig,
+    get_circuit_breaker,
+)
 from reqcheck.llm.prompts import PromptTemplates
 
 logger = get_logger("llm.client")
 
 
 class LLMClient:
-    """Wrapper for OpenAI API with retry logic and response parsing."""
+    """Wrapper for OpenAI API with retry logic, circuit breaker, and response parsing."""
 
     def __init__(self, settings: Settings | None = None):
         self._settings = settings or get_settings()
         self._client: OpenAI | None = None
+        self._circuit_breaker = self._init_circuit_breaker()
+
+    def _init_circuit_breaker(self):
+        """Initialize circuit breaker if enabled."""
+        if not self._settings.circuit_breaker_enabled:
+            return None
+
+        config = CircuitBreakerConfig(
+            failure_threshold=self._settings.circuit_breaker_failure_threshold,
+            recovery_timeout=self._settings.circuit_breaker_recovery_timeout,
+            success_threshold=self._settings.circuit_breaker_success_threshold,
+            failure_window=self._settings.circuit_breaker_failure_window,
+        )
+        return get_circuit_breaker(config)
 
     # Error types that should trigger a retry
     RETRYABLE_ERRORS = (
@@ -85,7 +105,7 @@ class LLMClient:
         return isinstance(error, self.RETRYABLE_ERRORS)
 
     def _call_api(self, user_prompt: str) -> str:
-        """Make API call with retry logic and exponential backoff.
+        """Make API call with circuit breaker, retry logic, and exponential backoff.
 
         Args:
             user_prompt: The prompt to send to the API.
@@ -94,32 +114,75 @@ class LLMClient:
             The API response content.
 
         Raises:
+            LLMCircuitBreakerError: If circuit breaker is open.
             LLMClientError: If all retry attempts fail or a non-retryable error occurs.
         """
+        metrics = get_metrics()
+
+        # Check circuit breaker first
+        if self._circuit_breaker is not None:
+            if not self._circuit_breaker.can_execute():
+                retry_after = self._circuit_breaker.time_until_retry()
+                self._circuit_breaker.record_rejected()
+                metrics.increment(MetricNames.CB_REJECTIONS)
+                logger.warning(
+                    "Circuit breaker rejecting request",
+                    extra={
+                        "retry_after": round(retry_after, 2),
+                        "state": self._circuit_breaker.state.value,
+                    },
+                )
+                raise LLMCircuitBreakerError(retry_after)
+
         max_retries = self._settings.llm_max_retries
         last_error: OpenAIError | None = None
 
         for attempt in range(max_retries + 1):
             try:
-                response = self.client.chat.completions.create(
-                    model=self._settings.openai_model,
-                    messages=[
-                        {"role": "system", "content": PromptTemplates.SYSTEM},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=self._settings.openai_temperature,
-                    max_tokens=self._settings.openai_max_tokens,
-                    response_format={"type": "json_object"},
-                )
+                metrics.increment(MetricNames.LLM_CALLS, tags={"provider": "openai"})
+
+                with metrics.timer(MetricNames.LLM_LATENCY, tags={"provider": "openai"}):
+                    response = self.client.chat.completions.create(
+                        model=self._settings.openai_model,
+                        messages=[
+                            {"role": "system", "content": PromptTemplates.SYSTEM},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=self._settings.openai_temperature,
+                        max_tokens=self._settings.openai_max_tokens,
+                        response_format={"type": "json_object"},
+                    )
+
                 content = response.choices[0].message.content
                 if content is None:
                     raise LLMResponseError("Empty response from API")
+
+                # Record success with circuit breaker
+                if self._circuit_breaker is not None:
+                    self._circuit_breaker.record_success()
+
+                # Record token usage
+                if response.usage:
+                    metrics.increment(
+                        MetricNames.LLM_TOKENS_USED,
+                        value=response.usage.total_tokens,
+                        tags={"provider": "openai"},
+                    )
+
                 return content
 
             except OpenAIError as e:
                 last_error = e
+                metrics.increment(
+                    MetricNames.LLM_ERRORS,
+                    tags={"provider": "openai", "type": type(e).__name__},
+                )
 
                 if not self._is_retryable_error(e):
+                    # Record failure with circuit breaker
+                    if self._circuit_breaker is not None:
+                        self._circuit_breaker.record_failure()
+
                     logger.error(
                         "OpenAI API error (non-retryable)",
                         extra={
@@ -157,6 +220,10 @@ class LLMClient:
                             "error_type": type(e).__name__,
                         },
                     )
+
+        # Record failure with circuit breaker (all retries exhausted)
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.record_failure()
 
         # All retries exhausted - check if it was a rate limit
         if isinstance(last_error, RateLimitError):
@@ -229,3 +296,9 @@ class LLMClient:
     def is_available(self) -> bool:
         """Check if LLM client is properly configured."""
         return bool(self._settings.openai_api_key)
+
+    def circuit_breaker_stats(self) -> dict[str, Any] | None:
+        """Get circuit breaker statistics, or None if disabled."""
+        if self._circuit_breaker is None:
+            return None
+        return self._circuit_breaker.stats.to_dict()

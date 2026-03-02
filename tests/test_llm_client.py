@@ -20,7 +20,16 @@ from reqcheck.core.exceptions import (
     LLMRateLimitError,
     LLMResponseError,
 )
+from reqcheck.llm.circuit_breaker import reset_circuit_breaker
 from reqcheck.llm.client import LLMClient
+
+
+@pytest.fixture(autouse=True)
+def reset_circuit_breaker_between_tests():
+    """Reset the circuit breaker before and after each test."""
+    reset_circuit_breaker()
+    yield
+    reset_circuit_breaker()
 
 
 @pytest.fixture

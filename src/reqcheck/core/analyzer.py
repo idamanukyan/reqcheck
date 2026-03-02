@@ -8,16 +8,19 @@ from reqcheck.analyzers.ambiguity import AmbiguityAnalyzer
 from reqcheck.analyzers.completeness import CompletenessAnalyzer
 from reqcheck.analyzers.risk import RiskAnalyzer
 from reqcheck.analyzers.testability import TestabilityAnalyzer
+from reqcheck.core.analysis_common import (
+    filter_issues_by_severity,
+    generate_fallback_summary,
+    sort_issues,
+)
 from reqcheck.core.config import Settings, get_settings
 from reqcheck.core.exceptions import AnalysisTimeoutError, LLMClientError
 from reqcheck.core.logging import get_logger, log_context, log_timing
 from reqcheck.core.models import (
     AnalysisReport,
     Issue,
-    IssueCategory,
     Requirement,
     ScoreBreakdown,
-    Severity,
 )
 from reqcheck.llm.client import LLMClient
 
@@ -182,10 +185,10 @@ class RequirementsAnalyzer:
         scores.calculate_overall()
 
         # Filter by minimum severity
-        filtered_issues = self._filter_by_severity(all_issues)
+        filtered_issues = filter_issues_by_severity(all_issues, self._settings.min_severity)
 
         # Sort issues by severity
-        sorted_issues = self._sort_issues(filtered_issues)
+        sorted_issues = sort_issues(filtered_issues)
 
         # Generate summary and recommendations
         summary, recommendations = self._generate_summary(
@@ -274,45 +277,6 @@ class RequirementsAnalyzer:
 
         return results
 
-    def _filter_by_severity(self, issues: list[Issue]) -> list[Issue]:
-        """Filter issues by minimum severity setting."""
-        severity_order = {
-            Severity.BLOCKER: 0,
-            Severity.WARNING: 1,
-            Severity.SUGGESTION: 2,
-        }
-        min_level = severity_order.get(
-            Severity(self._settings.min_severity), 2
-        )
-
-        return [
-            issue
-            for issue in issues
-            if severity_order.get(issue.severity, 2) <= min_level
-        ]
-
-    def _sort_issues(self, issues: list[Issue]) -> list[Issue]:
-        """Sort issues by severity (blockers first) then category."""
-        severity_order = {
-            Severity.BLOCKER: 0,
-            Severity.WARNING: 1,
-            Severity.SUGGESTION: 2,
-        }
-        category_order = {
-            IssueCategory.COMPLETENESS: 0,
-            IssueCategory.AMBIGUITY: 1,
-            IssueCategory.TESTABILITY: 2,
-            IssueCategory.RISK: 3,
-        }
-
-        return sorted(
-            issues,
-            key=lambda i: (
-                severity_order.get(i.severity, 99),
-                category_order.get(i.category, 99),
-            ),
-        )
-
     def _generate_summary(
         self,
         requirement: Requirement,
@@ -344,61 +308,7 @@ class RequirementsAnalyzer:
                 )
 
         # Fallback to rule-based summary
-        return self._generate_fallback_summary(issues, scores)
-
-    def _generate_fallback_summary(
-        self, issues: list[Issue], scores: ScoreBreakdown
-    ) -> tuple[str, list[str]]:
-        """Generate summary without LLM."""
-        blocker_count = sum(1 for i in issues if i.severity == Severity.BLOCKER)
-        warning_count = sum(1 for i in issues if i.severity == Severity.WARNING)
-
-        if blocker_count > 0:
-            status = "NOT ready for development"
-            urgency = f"Found {blocker_count} blocker(s) that must be resolved."
-        elif warning_count > 3:
-            status = "needs improvement before development"
-            urgency = f"Found {warning_count} warnings that should be addressed."
-        elif warning_count > 0:
-            status = "acceptable but could be improved"
-            urgency = f"Found {warning_count} minor issues to consider."
-        else:
-            status = "ready for development"
-            urgency = "No significant issues found."
-
-        summary = (
-            f"This requirement is {status}. {urgency} "
-            f"Overall quality score: {scores.overall:.0%}."
-        )
-
-        # Generate recommendations
-        recommendations = []
-        if blocker_count > 0:
-            recommendations.append("Resolve all blocker issues before starting development")
-
-        if scores.completeness < 0.6:
-            recommendations.append("Add missing acceptance criteria and error handling")
-
-        if scores.ambiguity < 0.6:
-            recommendations.append("Clarify vague terms and add specific requirements")
-
-        if scores.testability < 0.6:
-            recommendations.append(
-                "Make acceptance criteria more testable with measurable outcomes"
-            )
-
-        # Category-specific recommendations
-        by_category: dict[IssueCategory, int] = {}
-        for issue in issues:
-            by_category[issue.category] = by_category.get(issue.category, 0) + 1
-
-        if by_category.get(IssueCategory.RISK, 0) > 2:
-            recommendations.append("Schedule architecture/security review due to risk signals")
-
-        if not recommendations:
-            recommendations.append("Proceed with implementation")
-
-        return summary, recommendations
+        return generate_fallback_summary(issues, scores)
 
 
 def analyze_requirement(

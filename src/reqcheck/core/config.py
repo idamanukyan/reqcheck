@@ -1,6 +1,7 @@
 """Configuration management for reqcheck."""
 
-from functools import lru_cache
+import threading
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -80,6 +81,36 @@ class Settings(BaseSettings):
         ge=1.0,
         le=120.0,
         description="Maximum delay in seconds between retries",
+    )
+
+    # Circuit Breaker Configuration
+    circuit_breaker_enabled: bool = Field(
+        default=True,
+        description="Enable circuit breaker for LLM API calls",
+    )
+    circuit_breaker_failure_threshold: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Number of consecutive failures before opening circuit",
+    )
+    circuit_breaker_recovery_timeout: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=300.0,
+        description="Seconds to wait before attempting recovery",
+    )
+    circuit_breaker_success_threshold: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Successful calls needed to close circuit after recovery",
+    )
+    circuit_breaker_failure_window: float = Field(
+        default=60.0,
+        ge=10.0,
+        le=300.0,
+        description="Rolling window in seconds to track failures",
     )
 
     # LLM Cache Configuration
@@ -241,6 +272,30 @@ class Settings(BaseSettings):
         le=102400,
         description="Maximum size of metadata JSON in bytes",
     )
+    max_request_body_bytes: int = Field(
+        default=1048576,  # 1MB
+        ge=1024,
+        le=10485760,  # 10MB
+        description="Maximum request body size in bytes",
+    )
+
+    # Settings Cache Configuration
+    settings_cache_ttl_seconds: float = Field(
+        default=0.0,  # 0 = no TTL (cached forever until reset)
+        ge=0.0,
+        le=86400.0,  # Max 24 hours
+        description="TTL for settings cache in seconds (0 = no expiry)",
+    )
+
+    # Observability Configuration
+    metrics_enabled: bool = Field(
+        default=True,
+        description="Enable metrics collection",
+    )
+    metrics_log_level: str = Field(
+        default="",
+        description="If set, also log metrics at this level (debug, info, etc.)",
+    )
 
     @property
     def llm_available(self) -> bool:
@@ -325,12 +380,95 @@ class Settings(BaseSettings):
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
 
 
-@lru_cache
+class _SettingsCache:
+    """Thread-safe TTL-aware settings cache.
+
+    Caches settings with optional TTL for automatic refresh.
+    When TTL is 0 (default), settings are cached indefinitely until reset.
+    """
+
+    def __init__(self):
+        self._settings: Settings | None = None
+        self._cached_at: float = 0.0
+        self._lock = threading.RLock()
+
+    def get(self) -> Settings:
+        """Get cached settings, refreshing if TTL expired."""
+        with self._lock:
+            now = time.time()
+
+            # Check if we need to refresh
+            if self._settings is not None:
+                ttl = self._settings.settings_cache_ttl_seconds
+                if ttl > 0:
+                    age = now - self._cached_at
+                    if age >= ttl:
+                        self._settings = None
+
+            # Load settings if needed
+            if self._settings is None:
+                self._settings = Settings()
+                self._cached_at = now
+
+            return self._settings
+
+    def reset(self) -> None:
+        """Clear the settings cache."""
+        with self._lock:
+            self._settings = None
+            self._cached_at = 0.0
+
+    def is_expired(self) -> bool:
+        """Check if the cache is expired (for monitoring)."""
+        with self._lock:
+            if self._settings is None:
+                return True
+            ttl = self._settings.settings_cache_ttl_seconds
+            if ttl <= 0:
+                return False
+            return (time.time() - self._cached_at) >= ttl
+
+    def cache_info(self) -> dict[str, Any]:
+        """Get cache information for monitoring."""
+        with self._lock:
+            if self._settings is None:
+                return {
+                    "cached": False,
+                    "ttl_seconds": 0.0,
+                    "age_seconds": 0.0,
+                    "expired": True,
+                }
+
+            ttl = self._settings.settings_cache_ttl_seconds
+            age = time.time() - self._cached_at
+
+            return {
+                "cached": True,
+                "ttl_seconds": ttl,
+                "age_seconds": round(age, 2),
+                "expired": ttl > 0 and age >= ttl,
+            }
+
+
+# Global settings cache instance
+_settings_cache = _SettingsCache()
+
+
 def get_settings() -> Settings:
-    """Get cached settings instance."""
-    return Settings()
+    """Get cached settings instance with TTL support.
+
+    Settings are cached and will be automatically refreshed when TTL expires
+    (if settings_cache_ttl_seconds > 0). By default, settings are cached
+    indefinitely until reset_settings() is called.
+    """
+    return _settings_cache.get()
 
 
 def reset_settings() -> None:
-    """Clear the settings cache (useful for testing)."""
-    get_settings.cache_clear()
+    """Clear the settings cache (useful for testing or manual refresh)."""
+    _settings_cache.reset()
+
+
+def settings_cache_info() -> dict[str, Any]:
+    """Get settings cache information for monitoring."""
+    return _settings_cache.cache_info()
