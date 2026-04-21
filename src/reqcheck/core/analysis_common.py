@@ -161,7 +161,8 @@ def process_analyzer_result(
         scores.completeness = score
     elif name == "testability":
         scores.testability = score
-    # Risk score is tracked separately but not included in overall score
+    elif name == "risk":
+        scores.risk = score
 
 
 def count_issues_by_severity(issues: list[Issue]) -> dict[str, int]:

@@ -70,6 +70,7 @@ def format_markdown(
     lines.append(f"| Ambiguity | {_score_bar(report.scores.ambiguity)} |")
     lines.append(f"| Completeness | {_score_bar(report.scores.completeness)} |")
     lines.append(f"| Testability | {_score_bar(report.scores.testability)} |")
+    lines.append(f"| Risk | {_score_bar(report.scores.risk)} |")
     lines.append(f"| **Overall** | **{report.scores.overall:.0%}** |")
     lines.append("")
 
@@ -180,7 +181,8 @@ def format_summary(report: AnalysisReport) -> str:
     lines.append(
         f"Scores: Ambiguity {report.scores.ambiguity:.0%} | "
         f"Completeness {report.scores.completeness:.0%} | "
-        f"Testability {report.scores.testability:.0%}"
+        f"Testability {report.scores.testability:.0%} | "
+        f"Risk {report.scores.risk:.0%}"
     )
     lines.append(f"Overall: {report.scores.overall:.0%}")
     lines.append("")
@@ -214,6 +216,7 @@ def format_checklist(report: AnalysisReport) -> str:
         ("Testability", scores.testability >= threshold, f"{scores.testability:.0%}"),
         ("Completeness", scores.completeness >= threshold, f"{scores.completeness:.0%}"),
         ("Clarity", scores.ambiguity >= threshold, f"{scores.ambiguity:.0%}"),
+        ("Risk", scores.risk >= threshold, f"{scores.risk:.0%}"),
         ("No Blockers", report.blocker_count == 0, f"{report.blocker_count} found"),
     ]
 

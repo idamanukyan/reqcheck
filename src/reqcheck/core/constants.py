@@ -9,9 +9,10 @@ to improve maintainability and make calibration easier.
 # =============================================================================
 
 # Overall score calculation weights (must sum to 1.0)
-SCORE_WEIGHT_AMBIGUITY = 0.30
-SCORE_WEIGHT_COMPLETENESS = 0.35
-SCORE_WEIGHT_TESTABILITY = 0.35
+SCORE_WEIGHT_AMBIGUITY = 0.25
+SCORE_WEIGHT_COMPLETENESS = 0.30
+SCORE_WEIGHT_TESTABILITY = 0.30
+SCORE_WEIGHT_RISK = 0.15
 
 # Severity penalty weights for score estimation
 SEVERITY_WEIGHT_BLOCKER = 0.15
@@ -155,4 +156,5 @@ def get_overall_score_weights() -> dict[str, float]:
         "ambiguity": SCORE_WEIGHT_AMBIGUITY,
         "completeness": SCORE_WEIGHT_COMPLETENESS,
         "testability": SCORE_WEIGHT_TESTABILITY,
+        "risk": SCORE_WEIGHT_RISK,
     }

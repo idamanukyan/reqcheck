@@ -166,11 +166,12 @@ class RequirementsAnalyzer:
         # Process risk results
         if "risk" in results:
             if results["risk"]["success"]:
-                issues, _ = results["risk"]["result"]
+                issues, score = results["risk"]["result"]
                 all_issues.extend(issues)
+                scores.risk = score
                 logger.debug(
                     "Risk analysis complete",
-                    extra={"signal_count": len(issues)},
+                    extra={"signal_count": len(issues), "score": score},
                 )
             else:
                 logger.error(

@@ -93,6 +93,9 @@ class ScoreBreakdown(BaseModel):
     testability: float = Field(
         default=0.0, ge=0.0, le=1.0, description="0=untestable, 1=fully testable"
     )
+    risk: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="0=high risk, 1=low risk"
+    )
     overall: float = Field(default=0.0, ge=0.0, le=1.0, description="Weighted overall score")
 
     def calculate_overall(self) -> float:
@@ -102,6 +105,7 @@ class ScoreBreakdown(BaseModel):
             self.ambiguity * weights["ambiguity"]
             + self.completeness * weights["completeness"]
             + self.testability * weights["testability"]
+            + self.risk * weights["risk"]
         )
         return self.overall
 

@@ -133,7 +133,8 @@ class AsyncRequirementsAnalyzer:
                     scores.completeness = score
                 elif name == "testability":
                     scores.testability = score
-                # Risk score is not included in overall calculation
+                elif name == "risk":
+                    scores.risk = score
 
                 logger.debug(
                     f"{name.capitalize()} analysis complete",
