@@ -1,5 +1,3 @@
-=====
-
 # reqcheck
 
 > AI-powered requirements quality checker for user stories, tickets, and product specifications.
@@ -12,7 +10,7 @@ Most engineering teams catch bad requirements during sprint planning, code revie
 
 ## What it checks
 
-- **Ambiguity** — vague terms ("user-friendly," "fast," "intuitive") flagged with concrete rewrite suggestions
+- **Ambiguity** — vague terms ("user-friendly", "fast", "intuitive") flagged with concrete rewrite suggestions
 - **Missing acceptance criteria** — stories without measurable done conditions
 - **Untestable language** — requirements no QA engineer can verify
 - **Internal conflicts** — contradictions across multiple stories in the same epic
@@ -21,33 +19,56 @@ Most engineering teams catch bad requirements during sprint planning, code revie
 ## Stack
 
 - **Python** — core logic
-- **LLM provider** — pluggable (Claude / OpenAI)
+- **LLM provider** — pluggable, Claude or OpenAI
 - **License** — MIT
+
+## Installation
+
+```bash
+git clone https://github.com/idamanukyan/reqcheck.git
+cd reqcheck
+pip install -r requirements.txt
+```
+
+## Configuration
+
+Set your LLM provider and API key:
+
+```bash
+export REQCHECK_PROVIDER=claude        # or "openai"
+export ANTHROPIC_API_KEY=your-key      # or OPENAI_API_KEY
+```
 
 ## Usage
 
-[FILL: drop in your actual CLI or API example — e.g. `reqcheck path/to/story.md` with sample output]
+Check a single story:
 
 ```bash
-# Install
-pip install reqcheck
-
-# Run against a single story
-reqcheck check story.md
-
-# Run against a directory of stories
-reqcheck check ./tickets --format=json
+python -m reqcheck check path/to/story.md
 ```
+
+Check a directory of stories with JSON output:
+
+```bash
+python -m reqcheck check ./tickets --format=json
+```
+
+Sample output:
+
+story-042.md
+⚠ ambiguity: "the system should be fast" — define a measurable threshold
+✗ missing: no acceptance criteria found
+⚠ untestable: "users should feel confident" — rewrite as a behavior
+story-043.md
+✓ passes all checks
 
 ## Roadmap
 
-- [ ] Jira integration (pull tickets, post comments with findings)
+- [ ] Jira integration — pull tickets, post comments with findings
 - [ ] Linear / Notion connectors
 - [ ] Custom rule sets per team
-- [ ] Severity scoring
+- [ ] Severity scoring and CI gating
 
 ## Contributing
 
-Issues and PRs welcome. This project is MIT-licensed.
-
-=====
+Issues and PRs welcome. MIT-licensed.
